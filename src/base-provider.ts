@@ -16,6 +16,9 @@ export const DEFAULT_CONTEXT_LENGTH = 128000;
 
 /**
  * Base class for OpenAI-compatible chat providers.
+ * Provides common functionality for handling streaming responses, tool calls, and token estimation.
+ * Subclasses must implement the abstract methods to integrate with specific APIs.
+ *
  */
 export abstract class BaseChatModelProvider implements LanguageModelChatProvider {
     /** Buffer for assembling streamed tool calls by index. */
@@ -46,13 +49,38 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
     private _emittedTextToolCallKeys = new Set<string>();
     private _emittedTextToolCallIds = new Set<string>();
 
+    /**
+     * Creates a new instance of the base chat model provider.
+     * Initializes internal state for handling streaming responses and tool calls.
+     *
+     * @param secrets - VS Code secret storage for storing sensitive data like API keys.
+     */
     constructor(protected readonly secrets: vscode.SecretStorage) {}
 
+    /**
+     * Provides information about available language models.
+     * Subclasses must implement this to return model details from their API.
+     *
+     * @param options - Options for the request, including whether to suppress errors.
+     * @param token - Cancellation token to abort the operation.
+     * @returns Promise resolving to an array of language model information.
+     */
     abstract provideLanguageModelChatInformation(
         options: { silent: boolean },
         token: CancellationToken
     ): Promise<LanguageModelChatInformation[]>;
 
+    /**
+     * Provides a chat response from the language model.
+     * Subclasses must implement this to send requests to their API and handle responses.
+     *
+     * @param model - Information about the selected language model.
+     * @param messages - Array of chat messages for the conversation.
+     * @param options - Options for the response generation.
+     * @param progress - Progress callback to report response parts.
+     * @param token - Cancellation token to abort the operation.
+     * @returns Promise that resolves when the response is complete.
+     */
     abstract provideLanguageModelChatResponse(
         model: LanguageModelChatInformation,
         messages: readonly LanguageModelChatMessage[],
@@ -61,7 +89,13 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
         token: CancellationToken
     ): Promise<void>;
 
-    /** Roughly estimate tokens for VS Code chat messages (text only) */
+    /**
+     * Roughly estimate tokens for VS Code chat messages (text only).
+     * Uses a simple heuristic of 1 token per 4 characters.
+     *
+     * @param msgs - Array of chat messages to estimate tokens for.
+     * @returns Estimated number of tokens.
+     */
     protected estimateMessagesTokens(msgs: readonly vscode.LanguageModelChatMessage[]): number {
         let total = 0;
         for (const m of msgs) {
@@ -74,7 +108,13 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
         return total;
     }
 
-    /** Rough token estimate for tool definitions by JSON size */
+    /**
+     * Rough token estimate for tool definitions by JSON size.
+     * Serializes the tools to JSON and estimates tokens based on length.
+     *
+     * @param tools - Array of tool definitions to estimate tokens for.
+     * @returns Estimated number of tokens for the tools.
+     */
     protected estimateToolTokens(
         tools: { type: string; function: { name: string; description?: string; parameters?: object } }[] | undefined
     ): number {
@@ -90,7 +130,13 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
     }
 
     /**
-     * Returns the number of tokens for a given text using the model specific tokenizer logic
+     * Returns the number of tokens for a given text using the model specific tokenizer logic.
+     * Uses a simple heuristic for estimation since actual tokenization requires model-specific logic.
+     *
+     * @param model - Information about the language model.
+     * @param text - The text or message to count tokens for.
+     * @param _token - Cancellation token (unused in this implementation).
+     * @returns Promise resolving to the estimated token count.
      */
     async provideTokenCount(
         model: LanguageModelChatInformation,
@@ -112,6 +158,12 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
 
     /**
      * Read and parse the stream (SSE-like) response and report parts.
+     * Handles Server-Sent Events from the API, processing deltas and emitting progress.
+     *
+     * @param responseBody - The readable stream from the API response.
+     * @param progress - Progress callback to report response parts.
+     * @param token - Cancellation token to abort processing.
+     * @returns Promise that resolves when streaming is complete.
      */
     protected async processStreamingResponse(
         responseBody: ReadableStream<Uint8Array>,
@@ -178,6 +230,11 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
 
     /**
      * Handle a single streamed delta chunk, emitting text and tool call parts.
+     * Processes the delta from the streaming response and reports appropriate parts.
+     *
+     * @param delta - The delta object from the API response.
+     * @param progress - Progress callback to report response parts.
+     * @returns Promise resolving to true if something was emitted, false otherwise.
      */
     private async processDelta(
         delta: Record<string, unknown>,
@@ -442,6 +499,13 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
         return true;
     }
 
+    /**
+     * Flushes any active text-embedded tool call.
+     * Attempts to parse and emit the tool call if arguments are valid JSON.
+     *
+     * @param progress - Progress callback to report the tool call part.
+     * @returns Promise that resolves when flushing is complete.
+     */
     private async flushActiveTextToolCall(progress: vscode.Progress<vscode.LanguageModelResponsePart>): Promise<void> {
         if (!this._textToolActive) {
             return;
@@ -484,6 +548,14 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
         this._completedToolCallIndices.add(index);
     }
 
+    /**
+     * Flushes all accumulated tool call buffers.
+     * Attempts to parse and emit tool calls, optionally throwing on invalid JSON.
+     *
+     * @param progress - Progress callback to report tool call parts.
+     * @param throwOnInvalid - Whether to throw an error for invalid JSON arguments.
+     * @returns Promise that resolves when all buffers are flushed.
+     */
     private async flushToolCallBuffers(
         progress: vscode.Progress<vscode.LanguageModelResponsePart>,
         throwOnInvalid: boolean
@@ -518,7 +590,13 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
         }
     }
 
-    // Helper to strip control tokens from text if they leak
+    /**
+     * Helper to strip control tokens from text if they leak.
+     * Removes special tokens that might appear in the response text.
+     *
+     * @param text - The text to clean.
+     * @returns The text with control tokens removed.
+     */
     private stripControlTokens(text: string): string {
          // Implement if needed, or just return text if not used elsewhere, but the original code called `this.stripControlTokens`.
          // I missed copying that method or it wasn't shown in the view_file.

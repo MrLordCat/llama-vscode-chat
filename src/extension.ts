@@ -3,6 +3,13 @@ import * as vscode from "vscode";
 
 import { LlamaCppChatModelProvider } from "./llama-provider";
 
+/**
+ * Activates the VS Code extension.
+ * Registers the Llama.cpp chat model provider and management commands.
+ * Called when the extension is activated by VS Code.
+ *
+ * @param context - The extension context provided by VS Code.
+ */
 export function activate(context: vscode.ExtensionContext) {
 	// Build a descriptive User-Agent to help quantify API usage
 	const ext = vscode.extensions.getExtension("Llama.llama-vscode-chat");
@@ -44,4 +51,8 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 }
 
+/**
+ * Deactivates the VS Code extension.
+ * Performs cleanup when the extension is deactivated.
+ */
 export function deactivate() {}

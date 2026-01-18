@@ -3,6 +3,13 @@ import type { OpenAIChatMessage, OpenAIChatRole, OpenAIFunctionToolDef, OpenAITo
 
 // Tool calling sanitization helpers
 
+/**
+ * Checks if a property name is likely to represent an integer value.
+ * Uses heuristics based on common integer-related keywords.
+ *
+ * @param propertyName - The property name to check.
+ * @returns True if the property name suggests an integer, false otherwise.
+ */
 function isIntegerLikePropertyName(propertyName: string | undefined): boolean {
     if (!propertyName){
 		return false;
@@ -24,6 +31,13 @@ function isIntegerLikePropertyName(propertyName: string | undefined): boolean {
     return integerMarkers.some((m) => lowered.includes(m)) || lowered.endsWith("_id");
 }
 
+/**
+ * Sanitizes a function name to make it safe for use.
+ * Replaces invalid characters and ensures it starts with a letter.
+ *
+ * @param name - The original function name.
+ * @returns The sanitized function name.
+ */
 function sanitizeFunctionName(name: unknown): string {
     if (typeof name !== "string" || !name){
 		return "tool";
@@ -36,6 +50,13 @@ function sanitizeFunctionName(name: unknown): string {
     return sanitized.slice(0, 64);
 }
 
+/**
+ * Prunes unknown or unsupported keywords from a JSON schema.
+ * Keeps only allowed schema properties for compatibility.
+ *
+ * @param schema - The schema object to prune.
+ * @returns The pruned schema object.
+ */
 function pruneUnknownSchemaKeywords(schema: unknown): Record<string, unknown> {
     if (!schema || typeof schema !== "object" || Array.isArray(schema)){
 		return {};
@@ -65,6 +86,14 @@ function pruneUnknownSchemaKeywords(schema: unknown): Record<string, unknown> {
     return out;
 }
 
+/**
+ * Sanitizes a JSON schema by pruning unknown keywords and processing properties.
+ * Recursively cleans the schema for safe use in tool definitions.
+ *
+ * @param input - The schema to sanitize.
+ * @param propName - Optional property name for context.
+ * @returns The sanitized schema.
+ */
 function sanitizeSchema(input: unknown, propName?: string): Record<string, unknown> {
     if (!input || typeof input !== "object" || Array.isArray(input)) {
         return { type: "object", properties: {} } as Record<string, unknown>;
@@ -139,6 +168,13 @@ function sanitizeSchema(input: unknown, propName?: string): Record<string, unkno
  * Convert VS Code chat request messages into OpenAI-compatible message objects.
  * @param messages The VS Code chat messages to convert.
  * @returns OpenAI-compatible messages array.
+ */
+/**
+ * Converts VS Code language model chat messages to OpenAI-compatible format.
+ * Transforms message roles and content to match OpenAI's chat completion API.
+ *
+ * @param messages - Array of VS Code chat messages to convert.
+ * @returns Array of OpenAI-compatible chat messages.
  */
 export function convertMessages(messages: readonly vscode.LanguageModelChatRequestMessage[]): OpenAIChatMessage[] {
 	const raw: OpenAIChatMessage[] = [];
@@ -255,6 +291,13 @@ export function convertMessages(messages: readonly vscode.LanguageModelChatReque
  * Convert VS Code tool definitions to OpenAI function tool definitions.
  * @param options Request options containing tools and toolMode.
  */
+/**
+ * Converts VS Code language model chat options to OpenAI-compatible tool format.
+ * Extracts and transforms tool definitions for API requests.
+ *
+ * @param options - VS Code chat response options containing tools.
+ * @returns Object with tools array and tool_choice configuration.
+ */
 export function convertTools(options: vscode.ProvideLanguageModelChatResponseOptions): {
 	tools?: OpenAIFunctionToolDef[];
 	tool_choice?: "auto" | { type: "function"; function: { name: string } };
@@ -296,6 +339,12 @@ export function convertTools(options: vscode.ProvideLanguageModelChatResponseOpt
  * Validate tool names to ensure they contain only word chars, hyphens, or underscores.
  * @param tools Tools to validate.
  */
+/**
+ * Validates an array of VS Code language model chat tools.
+ * Ensures tool definitions are properly structured before use.
+ *
+ * @param tools - Array of tools to validate.
+ */
 export function validateTools(tools: readonly vscode.LanguageModelChatTool[]): void {
 	for (const tool of tools) {
 		if (!tool.name.match(/^[\w-]+$/)) {
@@ -310,6 +359,12 @@ export function validateTools(tools: readonly vscode.LanguageModelChatTool[]): v
 /**
  * Validate the request message sequence for correct tool call/result pairing.
  * @param messages The full request message list.
+ */
+/**
+ * Validates an array of VS Code language model chat request messages.
+ * Checks for proper message structure and content.
+ *
+ * @param messages - Array of messages to validate.
  */
 export function validateRequest(messages: readonly vscode.LanguageModelChatRequestMessage[]): void {
 	const lastMessage = messages[messages.length - 1];
@@ -359,6 +414,13 @@ export function validateRequest(messages: readonly vscode.LanguageModelChatReque
  * Type guard for LanguageModelToolResultPart-like values.
  * @param value Unknown value to test.
  */
+/**
+ * Type guard to check if a value is a tool result part.
+ * Determines if the value represents a tool call result with callId and content.
+ *
+ * @param value - The value to check.
+ * @returns True if the value is a tool result part, false otherwise.
+ */
 export function isToolResultPart(value: unknown): value is { callId: string; content?: ReadonlyArray<unknown> } {
 	if (!value || typeof value !== "object") {
 		return false;
@@ -372,6 +434,14 @@ export function isToolResultPart(value: unknown): value is { callId: string; con
 /**
  * Map VS Code message role to OpenAI message role string.
  * @param message The message whose role is mapped.
+ */
+/**
+ * Maps a VS Code chat message to an OpenAI-compatible role.
+ * Converts VS Code message types to OpenAI roles, excluding tool role.
+ *
+ * @param message - The VS Code chat message.
+ * @returns The corresponding OpenAI role.
+ * @author Maruf Bepary
  */
 function mapRole(message: vscode.LanguageModelChatRequestMessage): Exclude<OpenAIChatRole, "tool"> {
 	const USER = vscode.LanguageModelChatMessageRole.User as unknown as number;
@@ -389,6 +459,13 @@ function mapRole(message: vscode.LanguageModelChatRequestMessage): Exclude<OpenA
 /**
  * Concatenate tool result content into a single text string.
  * @param pr Tool result-like object with content array.
+ */
+/**
+ * Collects text content from a tool result part.
+ * Extracts and concatenates text from the content array.
+ *
+ * @param pr - The tool result part with content.
+ * @returns The concatenated text content.
  */
 function collectToolResultText(pr: { content?: ReadonlyArray<unknown> }): string {
 	let text = "";
@@ -412,6 +489,13 @@ function collectToolResultText(pr: { content?: ReadonlyArray<unknown> }): string
  * Try to parse a JSON object from a string.
  * @param text The input string.
  * @returns Parsed object or ok:false.
+ */
+/**
+ * Attempts to parse a string as JSON object.
+ * Safely parses JSON and returns success/failure result.
+ *
+ * @param text - The string to parse as JSON.
+ * @returns Object with ok flag and parsed value if successful.
  */
 export function tryParseJSONObject(text: string): { ok: true; value: Record<string, unknown> } | { ok: false } {
 	try {

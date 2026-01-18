@@ -12,11 +12,32 @@ import {
 import { BaseChatModelProvider, DEFAULT_CONTEXT_LENGTH, DEFAULT_MAX_OUTPUT_TOKENS } from "./base-provider";
 import { convertMessages, convertTools, validateRequest } from "./utils";
 
+/**
+ * Chat model provider for Llama.cpp servers.
+ * Implements the VS Code language model chat provider interface for Llama.cpp compatible APIs.
+ * Handles model discovery, chat responses, and streaming from local Llama.cpp instances.
+ *
+ */
 export class LlamaCppChatModelProvider extends BaseChatModelProvider {
+    /**
+     * Creates a new Llama.cpp chat model provider.
+     * Initializes the provider with secret storage and user agent for API requests.
+     *
+     * @param secrets - VS Code secret storage for storing server URL and API key.
+     * @param userAgent - User agent string to include in HTTP requests.
+     */
     constructor(secrets: vscode.SecretStorage, private readonly userAgent: string) {
         super(secrets);
     }
 
+    /**
+     * Provides information about available Llama.cpp models.
+     * Fetches model list from the configured server and returns model information.
+     *
+     * @param options - Options for the request, including error suppression.
+     * @param token - Cancellation token to abort the operation.
+     * @returns Promise resolving to an array of available models.
+     */
     async provideLanguageModelChatInformation(
         options: { silent: boolean },
         token: CancellationToken
@@ -47,6 +68,17 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         }
     }
 
+    /**
+     * Provides a chat response from the Llama.cpp model.
+     * Sends a chat completion request to the server and processes the streaming response.
+     *
+     * @param model - Information about the selected model.
+     * @param messages - Array of chat messages for the conversation.
+     * @param options - Options for the response generation.
+     * @param progress - Progress callback to report response parts.
+     * @param token - Cancellation token to abort the operation.
+     * @returns Promise that resolves when the response is complete.
+     */
     async provideLanguageModelChatResponse(
         model: LanguageModelChatInformation,
         messages: readonly LanguageModelChatMessage[],
@@ -119,15 +151,35 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         }
     }
 
+    /**
+     * Retrieves the configured server URL from secrets.
+     * Falls back to default localhost URL if not configured.
+     *
+     * @returns Promise resolving to the server URL.
+     */
     private async getServerUrl(): Promise<string> {
         // Default to localhost:8080 if not configured
         return (await this.secrets.get("llamacpp.serverUrl")) || "http://localhost:8080";
     }
 
+    /**
+     * Retrieves the optional API key from secrets.
+     * Returns undefined if no API key is configured.
+     *
+     * @returns Promise resolving to the API key or undefined.
+     */
     private async getApiKey(): Promise<string | undefined> {
         return await this.secrets.get("llamacpp.apiKey");
     }
 
+    /**
+     * Fetches the list of available models from the Llama.cpp server.
+     * Makes a GET request to the /v1/models endpoint.
+     *
+     * @param serverUrl - The base URL of the Llama.cpp server.
+     * @param apiKey - Optional API key for authentication.
+     * @returns Promise resolving to an array of model objects.
+     */
     private async fetchModels(serverUrl: string, apiKey?: string): Promise<{ id: string }[]> {
         const headers: Record<string, string> = {
              "User-Agent": this.userAgent
