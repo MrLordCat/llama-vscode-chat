@@ -2,6 +2,8 @@
 
 This extension integrates Llama.cpp models into GitHub Copilot Chat in VS Code.
 
+> NOTE: My computer is not powerful enough to run decent models locally so this extension wasn't tested fully. Feel free to contribute if this is something that is useful.
+
 ## Features
 
 - Integrates Llama.cpp server into VS Code's language model chat.
