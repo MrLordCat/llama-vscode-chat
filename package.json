@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/mbeps/llama-vscode-chat"
 	},
-	"version": "0.1.1",
+	"version": "0.1.6",
 	"engines": {
 		"vscode": "^1.104.0"
 	},
@@ -26,6 +26,9 @@
 		"url": "https://github.com/mbeps/llama-vscode-chat/issues"
 	},
 	"license": "MIT",
+	"activationEvents": [
+		"onStartupFinished"
+	],
 	"contributes": {
 		"languageModelChatProviders": [
 			{
@@ -34,10 +37,148 @@
 				"managementCommand": "llamacpp.manage"
 			}
 		],
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "llamacpp-sidebar",
+					"title": "Llama.cpp",
+					"icon": "assets/activity-icon.svg"
+				}
+			]
+		},
+		"views": {
+			"llamacpp-sidebar": [
+				{
+					"id": "llamacpp-quick-actions",
+					"name": "Quick Access",
+					"visibility": "visible"
+				}
+			]
+		},
+		"configuration": {
+			"title": "Llama.cpp Provider",
+			"properties": {
+				"llamacpp.autoCompact": {
+					"type": "boolean",
+					"default": true,
+					"description": "Automatically compact old chat history before sending requests when close to context limit."
+				},
+				"llamacpp.retryOnContextOverflow": {
+					"type": "boolean",
+					"default": true,
+					"description": "Retry once with hard compaction when server reports context overflow."
+				},
+				"llamacpp.contextUtilization": {
+					"type": "number",
+					"default": 0.85,
+					"minimum": 0.5,
+					"maximum": 0.95,
+					"description": "Soft context budget ratio used before compaction."
+				},
+				"llamacpp.hardContextUtilization": {
+					"type": "number",
+					"default": 0.72,
+					"minimum": 0.4,
+					"maximum": 0.9,
+					"description": "Hard context budget ratio used for overflow retry compaction."
+				},
+				"llamacpp.compactKeepLastTurns": {
+					"type": "number",
+					"default": 12,
+					"minimum": 2,
+					"maximum": 64,
+					"description": "Number of most recent non-system messages to keep during normal compaction."
+				},
+				"llamacpp.hardCompactKeepLastTurns": {
+					"type": "number",
+					"default": 6,
+					"minimum": 1,
+					"maximum": 32,
+					"description": "Number of recent non-system messages to keep during hard compaction retry."
+				},
+				"llamacpp.maxOutputTokensCap": {
+					"type": "number",
+					"default": 4096,
+					"minimum": 128,
+					"maximum": 32768,
+					"description": "Hard cap for max_tokens sent to server to prevent excessive output budgets."
+				},
+				"llamacpp.minReplyReserveTokens": {
+					"type": "number",
+					"default": 1536,
+					"minimum": 256,
+					"maximum": 32768,
+					"description": "Minimum tokens reserved for reply budget when calculating input context budget."
+				},
+				"llamacpp.maxToolsPerRequest": {
+					"type": "number",
+					"default": 128,
+					"minimum": 0,
+					"maximum": 128,
+					"description": "Maximum number of tools allowed in a single request."
+				},
+				"llamacpp.requestTimeoutMs": {
+					"type": "number",
+					"default": 240000,
+					"minimum": 10000,
+					"maximum": 1200000,
+					"description": "HTTP timeout for chat completion requests in milliseconds."
+				},
+				"llamacpp.thinkingMode": {
+					"type": "string",
+					"enum": [
+						"auto",
+						"off",
+						"light",
+						"balanced",
+						"deep"
+					],
+					"default": "auto",
+					"description": "Reasoning profile for Qwen/llama.cpp requests."
+				},
+				"llamacpp.reasoningBudget": {
+					"type": "number",
+					"default": 2048,
+					"minimum": 0,
+					"maximum": 65536,
+					"description": "Reasoning budget in tokens sent as reasoning_budget to compatible servers."
+				},
+				"llamacpp.toolResultMode": {
+					"type": "string",
+					"enum": [
+						"auto",
+						"tool",
+						"user"
+					],
+					"default": "auto",
+					"description": "How tool results are sent back to model context: auto (prefer tool role, fallback to user), tool (always OpenAI tool role), user (always flattened user text)."
+				}
+			}
+		},
 		"commands": [
+			{
+				"command": "llamacpp.openSidebar",
+				"title": "Llama.cpp: Open Sidebar"
+			},
 			{
 				"command": "llamacpp.manage",
 				"title": "Manage Llama.cpp Provider"
+			},
+			{
+				"command": "llamacpp.openSettings",
+				"title": "Llama.cpp: Open Settings"
+			},
+			{
+				"command": "llamacpp.setThinkingMode",
+				"title": "Llama.cpp: Set Thinking Mode"
+			},
+			{
+				"command": "llamacpp.setReasoningBudget",
+				"title": "Llama.cpp: Set Reasoning Budget"
+			},
+			{
+				"command": "llamacpp.setToolResultMode",
+				"title": "Llama.cpp: Set Tool Result Mode"
 			}
 		]
 	},

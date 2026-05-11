@@ -45,6 +45,26 @@ suite("Llama.cpp Chat Provider Extension", () => {
             );
             assert.strictEqual(count, 3); // "hello world".length / 4 ceil = 11/4 = 2.75 -> 3
         });
+
+        test("provideTokenCount estimates tool and data parts", async () => {
+            const message = {
+                role: vscode.LanguageModelChatMessageRole.User,
+                name: undefined,
+                content: [
+                    new vscode.LanguageModelToolCallPart("call-1", "read_file", { path: "README.md" }),
+                    new vscode.LanguageModelToolResultPart("call-1", [new vscode.LanguageModelTextPart("file content")]),
+                    vscode.LanguageModelDataPart.text("structured payload", "text/plain"),
+                ],
+            } as unknown as vscode.LanguageModelChatRequestMessage;
+
+            const count = await provider.provideTokenCount(
+                {} as any,
+                message,
+                new vscode.CancellationTokenSource().token
+            );
+
+            assert.ok(count > 0);
+        });
     });
 
     suite("utils/convertMessages", () => {
@@ -170,6 +190,29 @@ suite("Llama.cpp Chat Provider Extension", () => {
           assert.ok(out[0].content.includes("res1"));
           assert.ok(out[0].content.includes("followup"));
       });
+
+          test("keeps tool role when toolResultMode is tool", () => {
+            const callId = "call_tool_1";
+            const messages: vscode.LanguageModelChatMessage[] = [
+                {
+                    role: vscode.LanguageModelChatMessageRole.Assistant,
+                    content: [new vscode.LanguageModelToolCallPart(callId, "my_tool", { q: 1 })],
+                    name: undefined,
+                },
+                {
+                    role: vscode.LanguageModelChatMessageRole.User,
+                    content: [new vscode.LanguageModelToolResultPart(callId, [new vscode.LanguageModelTextPart("ok")])],
+                    name: undefined,
+                },
+            ];
+
+            const out: any[] = convertMessages(messages, { toolResultMode: "tool" });
+            assert.strictEqual(out.length, 2);
+            assert.strictEqual(out[0].role, "assistant");
+            assert.strictEqual(out[1].role, "tool");
+            assert.strictEqual(out[1].tool_call_id, callId);
+            assert.ok((out[1].content as string).includes("ok"));
+          });
 
       test("hoists system messages to the top", () => {
           const messages: vscode.LanguageModelChatMessage[] = [

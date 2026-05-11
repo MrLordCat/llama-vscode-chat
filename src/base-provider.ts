@@ -4,6 +4,7 @@ import {
     CancellationToken,
     LanguageModelChatInformation,
     LanguageModelChatMessage,
+    LanguageModelChatRequestMessage,
     LanguageModelChatProvider,
     ProvideLanguageModelChatResponseOptions,
     LanguageModelResponsePart,
@@ -99,11 +100,7 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
     protected estimateMessagesTokens(msgs: readonly vscode.LanguageModelChatMessage[]): number {
         let total = 0;
         for (const m of msgs) {
-            for (const part of m.content) {
-                if (part instanceof vscode.LanguageModelTextPart) {
-                    total += Math.ceil(part.value.length / 4);
-                }
-            }
+            total += this.estimateMessageContentTokens(m.content);
         }
         return total;
     }
@@ -130,6 +127,100 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
     }
 
     /**
+     * Estimate tokens for plain text using a lightweight heuristic.
+     */
+    private estimateTextTokens(text: string): number {
+        return text.length > 0 ? Math.ceil(text.length / 4) : 0;
+    }
+
+    /**
+     * Estimate tokens for a single unknown message part.
+     * Uses structural checks so it works even when parts are proxied/plain objects.
+     */
+    private estimateUnknownPartTokens(part: unknown): number {
+        if (part === undefined || part === null) {
+            return 0;
+        }
+
+        if (typeof part === "string") {
+            return this.estimateTextTokens(part);
+        }
+
+        if (part instanceof vscode.LanguageModelTextPart) {
+            return this.estimateTextTokens(part.value);
+        }
+
+        if (part instanceof vscode.LanguageModelToolCallPart) {
+            let total = this.estimateTextTokens(part.callId) + this.estimateTextTokens(part.name);
+            try {
+                total += Math.ceil(JSON.stringify(part.input ?? {}).length / 4);
+            } catch {
+                // Ignore serialization errors for rough estimation.
+            }
+            return total;
+        }
+
+        if (part instanceof vscode.LanguageModelToolResultPart) {
+            return this.estimateTextTokens(part.callId) + this.estimateMessageContentTokens(part.content);
+        }
+
+        if (part instanceof vscode.LanguageModelDataPart) {
+            const mime = this.estimateTextTokens(part.mimeType);
+            return mime + Math.max(1, Math.ceil(part.data.byteLength / 4));
+        }
+
+        if (typeof part === "object") {
+            const obj = part as Record<string, unknown>;
+
+            if (typeof obj.value === "string") {
+                return this.estimateTextTokens(obj.value);
+            }
+
+            if (obj.data instanceof Uint8Array) {
+                const mime = typeof obj.mimeType === "string" ? this.estimateTextTokens(obj.mimeType) : 0;
+                return mime + Math.max(1, Math.ceil(obj.data.byteLength / 4));
+            }
+
+            if (typeof obj.name === "string" && "input" in obj) {
+                let total = this.estimateTextTokens(obj.name);
+                if (typeof obj.callId === "string") {
+                    total += this.estimateTextTokens(obj.callId);
+                }
+                try {
+                    total += Math.ceil(JSON.stringify(obj.input ?? {}).length / 4);
+                } catch {
+                    // Ignore serialization errors for rough estimation.
+                }
+                return total;
+            }
+
+            if (Array.isArray(obj.content)) {
+                const callId = typeof obj.callId === "string" ? this.estimateTextTokens(obj.callId) : 0;
+                return callId + this.estimateMessageContentTokens(obj.content);
+            }
+
+            try {
+                return Math.ceil(JSON.stringify(obj).length / 4);
+            } catch {
+                return 0;
+            }
+        }
+
+        return 0;
+    }
+
+    /**
+     * Estimate tokens for heterogeneous message content parts.
+     */
+    private estimateMessageContentTokens(content: ReadonlyArray<unknown>): number {
+        let total = 0;
+        for (const part of content) {
+            total += this.estimateUnknownPartTokens(part);
+        }
+        return total;
+    }
+
+    /**
      * Returns the number of tokens for a given text using the model specific tokenizer logic.
      * Uses a simple heuristic for estimation since actual tokenization requires model-specific logic.
      *
@@ -140,20 +231,19 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
      */
     async provideTokenCount(
         model: LanguageModelChatInformation,
-        text: string | LanguageModelChatMessage,
+        text: string | LanguageModelChatRequestMessage,
         _token: CancellationToken
     ): Promise<number> {
         if (typeof text === "string") {
-            return Math.ceil(text.length / 4);
-        } else {
-            let totalTokens = 0;
-            for (const part of text.content) {
-                if (part instanceof vscode.LanguageModelTextPart) {
-                    totalTokens += Math.ceil(part.value.length / 4);
-                }
-            }
-            return totalTokens;
+            return this.estimateTextTokens(text);
         }
+
+        const messageLike = text as { content?: ReadonlyArray<unknown> };
+        if (Array.isArray(messageLike.content)) {
+            return this.estimateMessageContentTokens(messageLike.content);
+        }
+
+        return 0;
     }
 
     /**

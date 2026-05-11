@@ -1,54 +1,108 @@
 # Llama.cpp Provider for GitHub Copilot Chat
 
-This extension integrates Llama.cpp models into GitHub Copilot Chat in VS Code.
-
-> NOTE: My computer is not powerful enough to run decent models locally so this extension wasn't tested fully. Feel free to contribute if this is something that is useful.
+This extension connects OpenAI-compatible Llama.cpp endpoints to VS Code Chat.
 
 ## Features
 
-- Integrates Llama.cpp server into VS Code's language model chat.
-- Supports streaming responses.
-- Handles tool calling for function invocations.
-- Manages multiple models from the Llama.cpp server.
+- Streaming chat responses.
+- Tool calling with compatibility fallback for strict chat templates.
+- Context-aware compaction and overflow retry.
+- Thinking controls for compatible models (for example Qwen):
+  - `thinkingMode`
+  - `reasoningBudget`
+- Quick Actions view in the Activity Bar.
 
 ## Requirements
 
-- VS Code version 1.104.0 or higher.
-- A running Llama.cpp server with OpenAI-compatible API.
+- VS Code 1.104.0 or newer.
+- Running Llama.cpp server with OpenAI-compatible API:
+  - `GET /v1/models`
+  - `POST /v1/chat/completions`
 
-## Stack
+## Quick Start
 
-- [**TypeScript**](https://www.typescriptlang.org/): A typed superset of JavaScript.
-- [**VS Code API**](https://code.visualstudio.com/api): APIs for building extensions.
+1. Open command palette and run `Llama.cpp: Open Sidebar`.
+2. Run `Manage Llama.cpp Provider` and set server URL.
+3. Select a Llama.cpp model in chat model picker.
+4. Start chatting.
 
-## Design
+## Configuration
 
-The extension uses a base provider class for OpenAI-compatible chat APIs. The Llama.cpp provider extends this base to connect to a local Llama.cpp server. It handles model fetching, message conversion, and streaming responses. Tool calling is supported through OpenAI-compatible formats.
+Main settings are under `llamacpp.*` in VS Code Settings.
 
-## Setting Up Project
+- Context management:
+  - `autoCompact`
+  - `retryOnContextOverflow`
+  - `contextUtilization`
+  - `hardContextUtilization`
+  - `compactKeepLastTurns`
+  - `hardCompactKeepLastTurns`
+  - `maxOutputTokensCap`
+  - `minReplyReserveTokens`
+  - `maxToolsPerRequest`
+  - `requestTimeoutMs`
+- Reasoning:
+  - `thinkingMode`: `auto | off | light | balanced | deep`
+  - `reasoningBudget`: `0..65536`
+- Tool-result transport mode:
+  - `toolResultMode`: `auto | tool | user`
+  - `auto` starts with `role=tool` and falls back to `role=user` when backend chat template rejects tool-role messages.
+
+## Recommended Profile For Large Context Agent Work
+
+If you use this model as a daily coding agent with long sessions:
+
+- Keep `autoCompact = true`.
+- Keep `retryOnContextOverflow = true`.
+- Start with:
+  - `contextUtilization = 0.85`
+  - `hardContextUtilization = 0.72`
+  - `compactKeepLastTurns = 12`
+  - `hardCompactKeepLastTurns = 6`
+- Use `toolResultMode = auto` unless your model already reliably supports `role=tool`.
+- Use `thinkingMode = balanced` (or `auto`) for better latency/quality balance.
+
+## Known Limitation: Context Usage In VS Code Chat
+
+You may see current context usage shown as `0` in VS Code Chat for third-party providers, while GitHub Copilot models display usage.
+
+- This extension still performs internal token estimation and context budgeting before each request.
+- The built-in usage indicator behavior for custom providers is currently limited and may not reflect real usage even when requests are processed correctly.
+
+## Development
 
 1. Clone the repository.
+
 ```sh
-git clone https://github.com/your-org/llama-vscode-chat.git
+git clone https://github.com/mbeps/llama-vscode-chat.git
+cd llama-vscode-chat
 ```
 
-2. Install dependencies.
+1. Install dependencies.
+
 ```sh
 npm install
 ```
 
-3. Compile the extension.
+1. Compile.
+
 ```sh
 npm run compile
 ```
 
-4. Open in VS Code and run the extension.
+1. Run tests.
 
-## Usage
+```sh
+npm run test
+```
 
-Install the extension from the marketplace. Configure the Llama.cpp server URL via the command palette. Select the Llama.cpp provider in the chat interface. Start chatting with the integrated models.
+1. Package local VSIX.
+
+```sh
+npx @vscode/vsce package -o llama-vscode-chat-local.vsix
+```
 
 ## References
 
-- [Llama.cpp Documentation](https://github.com/ggerganov/llama.cpp)
+- [Llama.cpp](https://github.com/ggerganov/llama.cpp)
 - [VS Code Extension API](https://code.visualstudio.com/api)

@@ -164,6 +164,12 @@ function sanitizeSchema(input: unknown, propName?: string): Record<string, unkno
     return schema;
 }
 
+export type ToolResultMode = "user" | "tool";
+
+export interface ConvertMessagesOptions {
+	toolResultMode?: ToolResultMode;
+}
+
 /**
  * Convert VS Code chat request messages into OpenAI-compatible message objects.
  * @param messages The VS Code chat messages to convert.
@@ -176,19 +182,25 @@ function sanitizeSchema(input: unknown, propName?: string): Record<string, unkno
  * @param messages - Array of VS Code chat messages to convert.
  * @returns Array of OpenAI-compatible chat messages.
  */
-export function convertMessages(messages: readonly vscode.LanguageModelChatRequestMessage[]): OpenAIChatMessage[] {
+export function convertMessages(
+	messages: readonly vscode.LanguageModelChatRequestMessage[],
+	options?: ConvertMessagesOptions
+): OpenAIChatMessage[] {
+	const toolResultMode: ToolResultMode = options?.toolResultMode === "tool" ? "tool" : "user";
+	const knownToolNames = new Map<string, string>();
 	const raw: OpenAIChatMessage[] = [];
 	for (const m of messages) {
 		const role = mapRole(m);
 		const textParts: string[] = [];
 		const toolCalls: OpenAIToolCall[] = [];
-		const toolResults: { callId: string; content: string }[] = [];
+		const toolResults: { callId: string; content: string; name?: string }[] = [];
 
 		for (const part of m.content ?? []) {
 			if (part instanceof vscode.LanguageModelTextPart) {
 				textParts.push(part.value);
 			} else if (part instanceof vscode.LanguageModelToolCallPart) {
 				const id = part.callId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+				knownToolNames.set(id, part.name);
 				let args = "{}";
 				try {
 					args = JSON.stringify(part.input ?? {});
@@ -199,7 +211,7 @@ export function convertMessages(messages: readonly vscode.LanguageModelChatReque
 			} else if (isToolResultPart(part)) {
 				const callId = (part as { callId?: string }).callId ?? "";
 				const content = collectToolResultText(part as { content?: ReadonlyArray<unknown> });
-				toolResults.push({ callId, content });
+				toolResults.push({ callId, content, name: knownToolNames.get(callId) });
 			}
 		}
 
@@ -210,7 +222,15 @@ export function convertMessages(messages: readonly vscode.LanguageModelChatReque
 		}
 
 		for (const tr of toolResults) {
-			raw.push({ role: "user", content: tr.content || "" });
+			if (toolResultMode === "tool" && tr.callId) {
+				raw.push({ role: "tool", tool_call_id: tr.callId, name: tr.name, content: tr.content || "" });
+				continue;
+			}
+
+			const callMeta = tr.callId ? ` call_id=${tr.callId}` : "";
+			const nameMeta = tr.name ? ` name=${tr.name}` : "";
+			const prefix = `[tool_result${callMeta}${nameMeta}]`;
+			raw.push({ role: "user", content: tr.content ? `${prefix}\n${tr.content}` : prefix });
 		}
 
 		const text = textParts.join("");
@@ -264,11 +284,11 @@ export function convertMessages(messages: readonly vscode.LanguageModelChatReque
 
 		const isLastUserSide =
 			(last.role === "user" && typeof last.content === "string" && !last.tool_calls) ||
-			last.role === "tool";
+			(toolResultMode !== "tool" && last.role === "tool");
 
 		const isMsgUserSide =
 			(msg.role === "user" && typeof msg.content === "string" && !msg.tool_calls) ||
-			msg.role === "tool";
+			(toolResultMode !== "tool" && msg.role === "tool");
 
 		if (isLastUserSide && isMsgUserSide) {
 			// Ensure target is a Text User message
