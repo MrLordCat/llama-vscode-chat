@@ -280,10 +280,10 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         const hardContextUtil = this.clampNumber(cfg.get("hardContextUtilization", 0.72), 0.4, 0.9, 0.72);
         const keepLastTurns = this.clampInt(cfg.get("compactKeepLastTurns", 12), 2, 64, 12);
         const hardKeepLastTurns = this.clampInt(cfg.get("hardCompactKeepLastTurns", 6), 1, 32, 6);
-        const maxOutputCap = this.clampInt(cfg.get("maxOutputTokensCap", 4096), 128, 32768, 4096);
+        const maxOutputCap = this.clampInt(cfg.get("maxOutputTokensCap", 8192), 128, 32768, 8192);
         const minReplyReserve = this.clampInt(cfg.get("minReplyReserveTokens", 1536), 256, 32768, 1536);
         const maxTools = this.clampInt(cfg.get("maxToolsPerRequest", 128), 0, 128, 128);
-        const requestTimeoutMs = this.clampInt(cfg.get("requestTimeoutMs", 240000), 10000, 1200000, 240000);
+        const requestTimeoutMs = this.clampInt(cfg.get("requestTimeoutMs", 600000), 10000, 1200000, 600000);
         const autoCompact = cfg.get<boolean>("autoCompact", true) !== false;
         const retryOnOverflow = cfg.get<boolean>("retryOnContextOverflow", true) !== false;
         const thinkingMode = this.normalizeThinkingMode(cfg.get("thinkingMode", "auto"));
@@ -308,7 +308,12 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             console.warn(`[Llama.cpp Provider] Truncating tools from ${toolConfig.tools.length} to ${maxTools}`);
         }
 
-        const requestedMaxTokens = this.clampInt(options.modelOptions?.max_tokens, 1, 262144, 4096);
+        const requestedMaxTokens = this.clampInt(
+            options.modelOptions?.max_tokens,
+            1,
+            262144,
+            Math.max(1, Math.min(model.maxOutputTokens, maxOutputCap))
+        );
         const maxTokens = Math.max(1, Math.min(requestedMaxTokens, model.maxOutputTokens, maxOutputCap));
         const temperature = this.clampNumber(options.modelOptions?.temperature ?? 0.7, 0, 2, 0.7);
 

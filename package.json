@@ -98,7 +98,7 @@
 				},
 				"llamacpp.maxOutputTokensCap": {
 					"type": "number",
-					"default": 4096,
+					"default": 8192,
 					"minimum": 128,
 					"maximum": 32768,
 					"description": "Hard cap for max_tokens sent to server to prevent excessive output budgets."
@@ -119,7 +119,7 @@
 				},
 				"llamacpp.requestTimeoutMs": {
 					"type": "number",
-					"default": 240000,
+					"default": 600000,
 					"minimum": 10000,
 					"maximum": 1200000,
 					"description": "HTTP timeout for chat completion requests in milliseconds."

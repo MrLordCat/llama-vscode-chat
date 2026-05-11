@@ -59,8 +59,12 @@ If you use this model as a daily coding agent with long sessions:
   - `hardContextUtilization = 0.72`
   - `compactKeepLastTurns = 12`
   - `hardCompactKeepLastTurns = 6`
+  - `maxOutputTokensCap = 8192`
+  - `requestTimeoutMs = 600000`
 - Use `toolResultMode = auto` unless your model already reliably supports `role=tool`.
 - Use `thinkingMode = balanced` (or `auto`) for better latency/quality balance.
+
+If a response reaches max output tokens, the extension appends a hint in chat output so this is visible (instead of appearing as a silent stop).
 
 ## Known Limitation: Context Usage In VS Code Chat
 
@@ -68,6 +72,7 @@ You may see current context usage shown as `0` in VS Code Chat for third-party p
 
 - This extension still performs internal token estimation and context budgeting before each request.
 - The built-in usage indicator behavior for custom providers is currently limited and may not reflect real usage even when requests are processed correctly.
+- In practice, this means you can still see `0` in the UI even while long requests are being compacted and token-limited internally.
 
 ## Development
 

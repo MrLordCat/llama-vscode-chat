@@ -37,6 +37,9 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
     /** Track if we emitted the begin-tool-calls whitespace flush. */
     private _emittedBeginToolCallsHint = false;
 
+    /** Track whether we already emitted a max-length hint in the current response stream. */
+    private _emittedLengthFinishHint = false;
+
     // Lightweight tokenizer state for tool calls embedded in text
     private _textToolParserBuffer = "";
     private _textToolActive:
@@ -264,6 +267,7 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
         this._completedToolCallIndices.clear();
         this._hasEmittedAssistantText = false;
         this._emittedBeginToolCallsHint = false;
+        this._emittedLengthFinishHint = false;
         this._textToolParserBuffer = "";
         this._textToolActive = undefined;
         this._emittedTextToolCallKeys.clear();
@@ -312,6 +316,7 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
             this._completedToolCallIndices.clear();
             this._hasEmittedAssistantText = false;
             this._emittedBeginToolCallsHint = false;
+            this._emittedLengthFinishHint = false;
             this._textToolParserBuffer = "";
             this._textToolActive = undefined;
             this._emittedTextToolCallKeys.clear();
@@ -423,6 +428,18 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
         if (finish === "tool_calls" || finish === "stop") {
             // On both 'tool_calls' and 'stop', emit any buffered calls and throw on invalid JSON
             await this.flushToolCallBuffers(progress, /*throwOnInvalid*/ true);
+        } else if (finish === "length") {
+            // Provide an explicit hint for max-token stop, otherwise it looks like a silent hang/stop.
+            await this.flushToolCallBuffers(progress, /*throwOnInvalid*/ false);
+            if (!this._emittedLengthFinishHint) {
+                progress.report(
+                    new vscode.LanguageModelTextPart(
+                        "\n\n[output stopped: reached max output tokens; increase llamacpp.maxOutputTokensCap if needed]"
+                    )
+                );
+                this._emittedLengthFinishHint = true;
+            }
+            emitted = true;
         }
         return emitted;
     }
