@@ -363,6 +363,9 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         };
 
         requestBody.reasoning_budget = reasoningBudget;
+        requestBody.reasoning = {
+            budget_tokens: reasoningBudget,
+        };
 
         if (typeof options.modelOptions?.top_p === "number") {
             requestBody.top_p = this.clampNumber(options.modelOptions.top_p, 0, 1, 1);
