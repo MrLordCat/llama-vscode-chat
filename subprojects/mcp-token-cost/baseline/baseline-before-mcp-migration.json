@@ -1,0 +1,72 @@
+{
+  "generatedAt": "2026-05-29T07:33:39.938Z",
+  "source": {
+    "inputPath": "C:\\Users\\Chris\\Documents\\GitHub\\llama-vscode-chat\\logs.log",
+    "parsedLines": 138,
+    "invalidLines": 1,
+    "totalRawLines": 140
+  },
+  "summary": {
+    "totalRequestsSeen": 4,
+    "completedTurns": 3,
+    "turnsWithTokenEstimates": 3,
+    "avgAttempts": 1,
+    "continuationRetryRatePct": 0,
+    "overflowRetryRatePct": 0,
+    "autoCompactRatePct": 0,
+    "hardCompactRatePct": 0,
+    "estimatedInputTokens": {
+      "avg": 24092,
+      "median": 23172,
+      "p95": 32152
+    },
+    "estimatedOutputTokens": {
+      "avg": 163,
+      "median": 98,
+      "p95": 303
+    },
+    "estimatedTotalTokens": {
+      "avg": 24255,
+      "median": 23270,
+      "p95": 32240
+    }
+  },
+  "turns": [
+    {
+      "requestId": "3d624553-439c-4ce6-9f2c-dd921b7fa01b",
+      "modelId": "unknown",
+      "attempts": 1,
+      "continuationRetryCount": 0,
+      "retriedAfterOverflow": false,
+      "autoCompacted": false,
+      "hardCompacted": false,
+      "estimatedInputTokens": 16952,
+      "estimatedOutputTokens": 303,
+      "estimatedTotalTokens": 17255
+    },
+    {
+      "requestId": "aa0d7712-8ea5-4de5-94f3-6992ea6d884b",
+      "modelId": "Qwen3.6-27B-Q3_K_S.gguf",
+      "attempts": 1,
+      "continuationRetryCount": 0,
+      "retriedAfterOverflow": false,
+      "autoCompacted": false,
+      "hardCompacted": false,
+      "estimatedInputTokens": 23172,
+      "estimatedOutputTokens": 98,
+      "estimatedTotalTokens": 23270
+    },
+    {
+      "requestId": "ef4f01b7-faa4-4687-bf96-bfd3df4f57b6",
+      "modelId": "Qwen3.6-27B-Q3_K_S.gguf",
+      "attempts": 1,
+      "continuationRetryCount": 0,
+      "retriedAfterOverflow": false,
+      "autoCompacted": false,
+      "hardCompacted": false,
+      "estimatedInputTokens": 32152,
+      "estimatedOutputTokens": 88,
+      "estimatedTotalTokens": 32240
+    }
+  ]
+}

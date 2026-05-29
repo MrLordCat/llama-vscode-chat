@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/mbeps/llama-vscode-chat"
 	},
-	"version": "0.1.7",
+	"version": "0.1.23",
 	"engines": {
 		"vscode": "^1.104.0"
 	},
@@ -27,7 +27,8 @@
 	},
 	"license": "MIT",
 	"activationEvents": [
-		"onStartupFinished"
+		"onStartupFinished",
+		"onLanguageModelChatProvider:llamacpp"
 	],
 	"contributes": {
 		"languageModelChatProviders": [
@@ -58,6 +59,30 @@
 		"configuration": {
 			"title": "Llama.cpp Provider",
 			"properties": {
+				"llamacpp.serverUrl": {
+					"type": "string",
+					"default": "http://localhost:8000",
+					"description": "OpenAI-compatible llama.cpp server URL. The old secret-stored URL is still used as a fallback."
+				},
+				"llamacpp.contextLength": {
+					"type": "number",
+					"default": 65536,
+					"minimum": 4096,
+					"maximum": 262144,
+					"description": "Optional runtime context override for llama.cpp, for example --ctx-size 65536. When not explicitly set, the provider tries to infer context length from /v1/models metadata."
+				},
+				"llamacpp.modelFamily": {
+					"type": "string",
+					"default": "llama",
+					"description": "Model family advertised to VS Code Chat. Use auto to infer from model id, or set a value like qwen, llama, mistral, deepseek, gemma, or phi."
+				},
+				"llamacpp.modelListCacheTtlMs": {
+					"type": "number",
+					"default": 30000,
+					"minimum": 0,
+					"maximum": 600000,
+					"description": "How long to cache /v1/models results in milliseconds. Set to 0 to disable model list caching."
+				},
 				"llamacpp.autoCompact": {
 					"type": "boolean",
 					"default": true,
@@ -67,6 +92,23 @@
 					"type": "boolean",
 					"default": true,
 					"description": "Retry once with hard compaction when server reports context overflow."
+				},
+				"llamacpp.emptyResponseAutoRetry": {
+					"type": "boolean",
+					"default": true,
+					"description": "Automatically retry with an internal continuation prompt when a turn ends with no visible text and no tool calls."
+				},
+				"llamacpp.emptyResponseAutoRetryMaxAttempts": {
+					"type": "number",
+					"default": 1,
+					"minimum": 0,
+					"maximum": 3,
+					"description": "Maximum automatic continuation retries for empty model responses per turn."
+				},
+				"llamacpp.emptyResponseContinuationPrompt": {
+					"type": "string",
+					"default": "Continue from your previous response and complete the answer. Do not repeat already completed parts.",
+					"description": "Internal prompt appended for empty-response auto-retry continuation."
 				},
 				"llamacpp.contextUtilization": {
 					"type": "number",
@@ -119,10 +161,29 @@
 				},
 				"llamacpp.requestTimeoutMs": {
 					"type": "number",
-					"default": 600000,
+					"default": 1200000,
 					"minimum": 10000,
 					"maximum": 1200000,
 					"description": "HTTP timeout for chat completion requests in milliseconds."
+				},
+				"llamacpp.requestQueueTimeoutMs": {
+					"type": "number",
+					"default": 1200000,
+					"minimum": 0,
+					"maximum": 1200000,
+					"description": "Maximum time a chat request can wait for the local llama.cpp request slot. Set to 0 to wait indefinitely."
+				},
+				"llamacpp.cachePrompt": {
+					"type": "boolean",
+					"default": true,
+					"description": "Send cache_prompt=true to llama.cpp so repeated prompt prefixes can reuse the server-side KV cache when supported."
+				},
+				"llamacpp.maxToolResultChars": {
+					"type": "number",
+					"default": 24000,
+					"minimum": 0,
+					"maximum": 1000000,
+					"description": "Maximum characters per tool result sent to the model. Large tool outputs are truncated before they can overwhelm local context. Set to 0 to disable truncation."
 				},
 				"llamacpp.thinkingMode": {
 					"type": "string",
@@ -152,6 +213,40 @@
 					],
 					"default": "auto",
 					"description": "How tool results are sent back to model context: auto (prefer tool role, fallback to user), tool (always OpenAI tool role), user (always flattened user text)."
+				},
+				"llamacpp.enableFileLogging": {
+					"type": "boolean",
+					"default": true,
+					"description": "Write detailed provider logs to a JSONL file in the extension global storage."
+				},
+				"llamacpp.logStreamChunks": {
+					"type": "boolean",
+					"default": false,
+					"description": "Include streaming response chunks in log files. Disabled by default because chunk logging duplicates generated text and adds overhead during long local generations."
+				},
+				"llamacpp.maxLoggedStreamChunkChars": {
+					"type": "number",
+					"default": 4096,
+					"minimum": 0,
+					"maximum": 100000,
+					"description": "Maximum characters of each stream chunk to write when logStreamChunks is enabled. Set to 0 to log chunk metadata without text."
+				},
+				"llamacpp.showPerformanceStatusBar": {
+					"type": "boolean",
+					"default": true,
+					"description": "Show a status bar item with estimated llama.cpp throughput (tok/s) and turn latency from the latest chat response."
+				},
+				"llamacpp.showContextUsageStatusBar": {
+					"type": "boolean",
+					"default": true,
+					"description": "Show a status bar item with the latest llama.cpp context usage estimate and budget breakdown."
+				},
+				"llamacpp.maxLogFiles": {
+					"type": "number",
+					"default": 20,
+					"minimum": 1,
+					"maximum": 200,
+					"description": "Maximum number of JSONL log files kept in the logs directory. Older files are removed automatically."
 				}
 			}
 		},
@@ -179,6 +274,42 @@
 			{
 				"command": "llamacpp.setToolResultMode",
 				"title": "Llama.cpp: Set Tool Result Mode"
+			},
+			{
+				"command": "llamacpp.refreshModels",
+				"title": "Llama.cpp: Refresh Models"
+			},
+			{
+				"command": "llamacpp.openCopilotModelPicker",
+				"title": "Llama.cpp: Open Copilot Model Picker"
+			},
+			{
+				"command": "llamacpp.openLogsFolder",
+				"title": "Llama.cpp: Open Logs Folder"
+			},
+			{
+				"command": "llamacpp.openLatestLog",
+				"title": "Llama.cpp: Open Latest Log"
+			},
+			{
+				"command": "llamacpp.copyLatestLogPath",
+				"title": "Llama.cpp: Copy Latest Log Path"
+			},
+			{
+				"command": "llamacpp.toggleFileLogging",
+				"title": "Llama.cpp: Toggle File Logging"
+			},
+			{
+				"command": "llamacpp.toggleStreamChunkLogging",
+				"title": "Llama.cpp: Toggle Stream Chunk Logging"
+			},
+			{
+				"command": "llamacpp.togglePerformanceStatusBar",
+				"title": "Llama.cpp: Toggle Performance Status Bar"
+			},
+			{
+				"command": "llamacpp.toggleContextUsageStatusBar",
+				"title": "Llama.cpp: Toggle Context Usage Status Bar"
 			}
 		]
 	},

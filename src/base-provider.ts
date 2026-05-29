@@ -12,8 +12,8 @@ import {
 } from "vscode";
 import { tryParseJSONObject } from "./utils";
 
-export const DEFAULT_MAX_OUTPUT_TOKENS = 16000;
-export const DEFAULT_CONTEXT_LENGTH = 128000;
+export const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
+export const DEFAULT_CONTEXT_LENGTH = 65536;
 
 /**
  * Base class for OpenAI-compatible chat providers.
@@ -52,6 +52,9 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
           };
     private _emittedTextToolCallKeys = new Set<string>();
     private _emittedTextToolCallIds = new Set<string>();
+    private _thinkingTagBuffer = "";
+    private _insideThinkingTag = false;
+    private _thinkingFallbackHeaderEmitted = false;
 
     /**
      * Creates a new instance of the base chat model provider.
@@ -272,6 +275,9 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
         this._textToolActive = undefined;
         this._emittedTextToolCallKeys.clear();
         this._emittedTextToolCallIds.clear();
+        this._thinkingTagBuffer = "";
+        this._insideThinkingTag = false;
+        this._thinkingFallbackHeaderEmitted = false;
 
         const reader = responseBody.getReader();
         const decoder = new TextDecoder();
@@ -289,26 +295,24 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
                 buffer = lines.pop() || "";
 
                 for (const line of lines) {
-                    if (!line.startsWith("data: ")) {
-                        continue;
-                    }
-                    const data = line.slice(6);
-                    if (data === "[DONE]") {
-                        // Do not throw on [DONE]; any incomplete/empty buffers are ignored.
-                        await this.flushToolCallBuffers(progress, /*throwOnInvalid*/ false);
-                        // Flush any in-progress text-embedded tool call (silent if incomplete)
-                        await this.flushActiveTextToolCall(progress);
-                        continue;
-                    }
-
-                    try {
-                        const parsed = JSON.parse(data);
-                        await this.processDelta(parsed, progress);
-                    } catch {
-                        // Silently ignore malformed SSE lines temporarily
-                    }
+                    await this.processSseLine(line, progress);
                 }
             }
+
+            buffer += decoder.decode();
+            if (buffer.length > 0) {
+                for (const line of buffer.split("\n")) {
+                    const trimmedLine = line.trim();
+                    if (!trimmedLine) {
+                        continue;
+                    }
+                    await this.processSseLine(trimmedLine, progress);
+                }
+            }
+
+            await this.flushToolCallBuffers(progress, /*throwOnInvalid*/ false);
+            await this.flushActiveTextToolCall(progress);
+            this.flushThinkingBuffers(progress);
         } finally {
             reader.releaseLock();
             // Clean up any leftover tool call state
@@ -320,6 +324,35 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
             this._textToolParserBuffer = "";
             this._textToolActive = undefined;
             this._emittedTextToolCallKeys.clear();
+            this._thinkingTagBuffer = "";
+            this._insideThinkingTag = false;
+            this._thinkingFallbackHeaderEmitted = false;
+        }
+    }
+
+    private async processSseLine(
+        line: string,
+        progress: vscode.Progress<vscode.LanguageModelResponsePart>
+    ): Promise<void> {
+        if (!line.startsWith("data: ")) {
+            return;
+        }
+
+        const data = line.slice(6);
+        if (data === "[DONE]") {
+            // Do not throw on [DONE]; any incomplete/empty buffers are ignored.
+            await this.flushToolCallBuffers(progress, /*throwOnInvalid*/ false);
+            // Flush any in-progress text-embedded tool call (silent if incomplete)
+            await this.flushActiveTextToolCall(progress);
+            this.flushThinkingBuffers(progress);
+            return;
+        }
+
+        try {
+            const parsed = JSON.parse(data);
+            await this.processDelta(parsed, progress);
+        } catch {
+            // Silently ignore malformed SSE lines temporarily
         }
     }
 
@@ -345,35 +378,19 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
 
         // report thinking progress if backend provides it and host supports it
         try {
-            const maybeThinking =
-                (choice as Record<string, unknown> | undefined)?.thinking ?? (deltaObj as Record<string, unknown> | undefined)?.thinking;
-            if (maybeThinking !== undefined) {
-                const vsAny = vscode as unknown as Record<string, unknown>;
-                const ThinkingCtor = vsAny["LanguageModelThinkingPart"] as
-                    | (new (text: string, id?: string, metadata?: unknown) => unknown)
-                    | undefined;
-                if (ThinkingCtor) {
-                    let text = "";
-                    let id: string | undefined;
-                    let metadata: unknown;
-                    if (maybeThinking && typeof maybeThinking === "object") {
-                        const mt = maybeThinking as Record<string, unknown>;
-                        text = typeof mt["text"] === "string" ? (mt["text"] as string) : "";
-                        id = typeof mt["id"] === "string" ? (mt["id"] as string) : undefined;
-                        metadata = mt["metadata"];
-                    } else if (typeof maybeThinking === "string") {
-                        text = maybeThinking;
-                    }
-                    if (text) {
-                        progress.report(
-                            new (ThinkingCtor as new (text: string, id?: string, metadata?: unknown) => unknown)(
-                                text,
-                                id,
-                                metadata
-                            ) as unknown as vscode.LanguageModelResponsePart
-                        );
-                        emitted = true;
-                    }
+            const thinkingCandidates: unknown[] = [
+                (choice as Record<string, unknown> | undefined)?.thinking,
+                (choice as Record<string, unknown> | undefined)?.reasoning,
+                (choice as Record<string, unknown> | undefined)?.reasoning_content,
+                (deltaObj as Record<string, unknown> | undefined)?.thinking,
+                (deltaObj as Record<string, unknown> | undefined)?.reasoning,
+                (deltaObj as Record<string, unknown> | undefined)?.reasoning_content,
+            ];
+
+            for (const candidate of thinkingCandidates) {
+                const extracted = this.extractThinkingPayload(candidate);
+                if (extracted.text && this.emitThinkingText(progress, extracted.text, extracted.id, extracted.metadata)) {
+                    emitted = true;
                 }
             }
         } catch {
@@ -442,6 +459,160 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
             emitted = true;
         }
         return emitted;
+    }
+
+    private getThinkingConstructor(): (new (text: string, id?: string, metadata?: unknown) => unknown) | undefined {
+        const vsAny = vscode as unknown as Record<string, unknown>;
+        return vsAny["LanguageModelThinkingPart"] as
+            | (new (text: string, id?: string, metadata?: unknown) => unknown)
+            | undefined;
+    }
+
+    private emitThinkingText(
+        progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+        text: string,
+        id?: string,
+        metadata?: unknown
+    ): boolean {
+        if (!text) {
+            return false;
+        }
+
+        const ThinkingCtor = this.getThinkingConstructor();
+        if (ThinkingCtor) {
+            progress.report(
+                new (ThinkingCtor as new (text: string, id?: string, metadata?: unknown) => unknown)(
+                    text,
+                    id,
+                    metadata
+                ) as unknown as vscode.LanguageModelResponsePart
+            );
+            return true;
+        }
+
+        if (!this._thinkingFallbackHeaderEmitted) {
+            progress.report(new vscode.LanguageModelTextPart("\n[thinking]\n"));
+            this._thinkingFallbackHeaderEmitted = true;
+        }
+        progress.report(new vscode.LanguageModelTextPart(text));
+        return true;
+    }
+
+    private extractThinkingPayload(value: unknown): { text: string; id?: string; metadata?: unknown } {
+        if (typeof value === "string") {
+            return { text: value };
+        }
+
+        if (Array.isArray(value)) {
+            const chunks = value
+                .map(item => this.extractThinkingPayload(item).text)
+                .filter(text => text.length > 0);
+            return { text: chunks.join("") };
+        }
+
+        if (!value || typeof value !== "object") {
+            return { text: "" };
+        }
+
+        const obj = value as Record<string, unknown>;
+        const id = typeof obj["id"] === "string" ? (obj["id"] as string) : undefined;
+        const metadata = obj["metadata"];
+        const candidates = [
+            obj["text"],
+            obj["thinking"],
+            obj["reasoning"],
+            obj["reasoning_content"],
+            obj["content"],
+            obj["delta"],
+        ];
+
+        for (const candidate of candidates) {
+            const extracted = this.extractThinkingPayload(candidate);
+            if (extracted.text) {
+                return { text: extracted.text, id: extracted.id ?? id, metadata: extracted.metadata ?? metadata };
+            }
+        }
+
+        return { text: "", id, metadata };
+    }
+
+    private longestPartialSuffix(source: string, target: string): number {
+        for (let k = Math.min(target.length - 1, source.length); k > 0; k--) {
+            if (source.endsWith(target.slice(0, k))) {
+                return k;
+            }
+        }
+        return 0;
+    }
+
+    private extractThinkingFromVisibleText(
+        input: string,
+        progress: vscode.Progress<vscode.LanguageModelResponsePart>
+    ): { visibleText: string; emittedAny: boolean } {
+        const OPEN = "<think>";
+        const CLOSE = "</think>";
+
+        let data = this._thinkingTagBuffer + input;
+        let visible = "";
+        let emittedAny = false;
+        this._thinkingTagBuffer = "";
+
+        while (data.length > 0) {
+            if (!this._insideThinkingTag) {
+                const openIndex = data.indexOf(OPEN);
+                if (openIndex === -1) {
+                    const keep = this.longestPartialSuffix(data, OPEN);
+                    const chunk = keep > 0 ? data.slice(0, data.length - keep) : data;
+                    if (chunk) {
+                        visible += chunk;
+                    }
+                    this._thinkingTagBuffer = keep > 0 ? data.slice(data.length - keep) : "";
+                    data = "";
+                    break;
+                }
+
+                if (openIndex > 0) {
+                    visible += data.slice(0, openIndex);
+                }
+                data = data.slice(openIndex + OPEN.length);
+                this._insideThinkingTag = true;
+                continue;
+            }
+
+            const closeIndex = data.indexOf(CLOSE);
+            if (closeIndex === -1) {
+                const keep = this.longestPartialSuffix(data, CLOSE);
+                const chunk = keep > 0 ? data.slice(0, data.length - keep) : data;
+                if (chunk && this.emitThinkingText(progress, chunk)) {
+                    emittedAny = true;
+                }
+                this._thinkingTagBuffer = keep > 0 ? data.slice(data.length - keep) : "";
+                data = "";
+                break;
+            }
+
+            const chunk = data.slice(0, closeIndex);
+            if (chunk && this.emitThinkingText(progress, chunk)) {
+                emittedAny = true;
+            }
+            data = data.slice(closeIndex + CLOSE.length);
+            this._insideThinkingTag = false;
+        }
+
+        return { visibleText: visible, emittedAny };
+    }
+
+    private flushThinkingBuffers(progress: vscode.Progress<vscode.LanguageModelResponsePart>): void {
+        if (!this._thinkingTagBuffer) {
+            return;
+        }
+
+        if (this._insideThinkingTag) {
+            this.emitThinkingText(progress, this._thinkingTagBuffer);
+        } else {
+            progress.report(new vscode.LanguageModelTextPart(this._thinkingTagBuffer));
+        }
+        this._thinkingTagBuffer = "";
     }
 
     private processTextContent(
@@ -563,8 +734,13 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
             }
         }
 
+        const processed = this.extractThinkingFromVisibleText(visibleOut, progress);
+        if (processed.emittedAny) {
+            emittedAny = true;
+        }
+
         // Emit any visible text
-        const textToEmit = visibleOut;
+        const textToEmit = processed.visibleText;
         if (textToEmit && textToEmit.length > 0) {
             progress.report(new vscode.LanguageModelTextPart(textToEmit));
             emittedText = true;

@@ -164,6 +164,31 @@ function sanitizeSchema(input: unknown, propName?: string): Record<string, unkno
     return schema;
 }
 
+function appendToolDescription(base: string, extra: string | undefined): string {
+	if (!extra) {
+		return base;
+	}
+	if (!base) {
+		return extra;
+	}
+	return `${base}\n\n${extra}`;
+}
+
+function getToolExecutionHint(name: string, hasRunInTerminal: boolean): string | undefined {
+	switch (name) {
+		case "run_in_terminal":
+			return "Primary shell execution tool. Use this for running scripts and one-off terminal commands.";
+		case "create_and_run_task":
+			return "Use only for existing VS Code tasks. For ad-hoc shell commands, prefer run_in_terminal.";
+		case "run_vscode_command":
+			return hasRunInTerminal
+				? "Do not use this to create terminals or run shell commands. Use run_in_terminal instead."
+				: "Use only for VS Code UI commands, not shell command execution.";
+		default:
+			return undefined;
+	}
+}
+
 export type ToolResultMode = "user" | "tool";
 
 export interface ConvertMessagesOptions {
@@ -326,12 +351,20 @@ export function convertTools(options: vscode.ProvideLanguageModelChatResponseOpt
 	if (!tools || tools.length === 0) {
 		return {};
 	}
+	const requiredMode = options.toolMode === vscode.LanguageModelChatToolMode.Required;
+	const hasRunInTerminal = tools.some((t) => sanitizeFunctionName((t as { name?: string } | undefined)?.name) === "run_in_terminal");
+	const effectiveTools = tools
+		.filter((t): t is vscode.LanguageModelChatTool => Boolean(t && typeof t === "object"))
+		.filter((t) => !(hasRunInTerminal && !requiredMode && sanitizeFunctionName(t.name) === "run_vscode_command"));
 
-	const toolDefs: OpenAIFunctionToolDef[] = tools
-		.filter((t) => t && typeof t === "object")
-		.map((t) => {
+	if (effectiveTools.length === 0) {
+		return {};
+	}
+
+	const toolDefs: OpenAIFunctionToolDef[] = effectiveTools.map((t) => {
 			const name = sanitizeFunctionName(t.name);
-			const description = typeof t.description === "string" ? t.description : "";
+			const descriptionBase = typeof t.description === "string" ? t.description : "";
+			const description = appendToolDescription(descriptionBase, getToolExecutionHint(name, hasRunInTerminal));
 			const params = sanitizeSchema(t.inputSchema ?? { type: "object", properties: {} });
 			return {
 				type: "function" as const,
@@ -344,12 +377,11 @@ export function convertTools(options: vscode.ProvideLanguageModelChatResponseOpt
 		});
 
 	let tool_choice: "auto" | { type: "function"; function: { name: string } } = "auto";
-	if (options.toolMode === vscode.LanguageModelChatToolMode.Required) {
-		if (tools.length !== 1) {
-            console.error("[Llama.cpp Chat Provider] ToolMode.Required but multiple tools:", tools.length);
+	if (requiredMode) {
+		if (effectiveTools.length !== 1) {
             throw new Error("LanguageModelChatToolMode.Required is not supported with more than one tool");
 		}
-		tool_choice = { type: "function", function: { name: sanitizeFunctionName(tools[0].name) } };
+		tool_choice = { type: "function", function: { name: sanitizeFunctionName(effectiveTools[0].name) } };
 	}
 
 	return { tools: toolDefs, tool_choice };
@@ -368,7 +400,6 @@ export function convertTools(options: vscode.ProvideLanguageModelChatResponseOpt
 export function validateTools(tools: readonly vscode.LanguageModelChatTool[]): void {
 	for (const tool of tools) {
 		if (!tool.name.match(/^[\w-]+$/)) {
-            console.error("[Llama.cpp Chat Provider] Invalid tool name detected:", tool.name);
             throw new Error(
                 `Invalid tool name "${tool.name}": only alphanumeric characters, hyphens, and underscores are allowed.`
             );
@@ -389,8 +420,7 @@ export function validateTools(tools: readonly vscode.LanguageModelChatTool[]): v
 export function validateRequest(messages: readonly vscode.LanguageModelChatRequestMessage[]): void {
 	const lastMessage = messages[messages.length - 1];
 	if (!lastMessage) {
-    console.error("[Llama.cpp Chat Provider] No messages in request");
-    throw new Error("Invalid request: no messages.");
+		throw new Error("Invalid request: no messages.");
 	}
 
 	messages.forEach((message, i) => {
@@ -410,16 +440,11 @@ export function validateRequest(messages: readonly vscode.LanguageModelChatReque
 			while (toolCallIds.size > 0) {
 				const nextMessage = messages[nextMessageIdx++];
 				if (!nextMessage || nextMessage.role !== vscode.LanguageModelChatMessageRole.User) {
-                    console.error("[Llama.cpp Chat Provider] Validation failed: missing tool result for call IDs:", Array.from(toolCallIds));
                     throw new Error(errMsg);
 				}
 
 				nextMessage.content.forEach((part) => {
 					if (!isToolResultPart(part)) {
-						const ctorName =
-							(Object.getPrototypeOf(part as object) as { constructor?: { name?: string } } | undefined)?.constructor
-								?.name ?? typeof part;
-                        console.error("[Llama.cpp Chat Provider] Validation failed: expected tool result part, got:", ctorName);
                         throw new Error(errMsg);
 					}
 					const callId = (part as { callId: string }).callId;

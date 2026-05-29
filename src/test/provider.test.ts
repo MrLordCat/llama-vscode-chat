@@ -65,6 +65,409 @@ suite("Llama.cpp Chat Provider Extension", () => {
 
             assert.ok(count > 0);
         });
+
+        test("compact summary redacts verbose tool payloads", () => {
+            const providerAny = provider as unknown as {
+                compactOpenAiMessages: (
+                    messages: Array<{
+                        role: "system" | "user" | "assistant" | "tool";
+                        content?: string;
+                        name?: string;
+                        tool_calls?: Array<{ function?: { name?: string } }>;
+                    }>,
+                    tokenBudget: number,
+                    keepLastCount: number,
+                    label: string
+                ) => Array<{ role: string; content?: string }>;
+            };
+
+            const longToolPayload = "tool-payload-very-long-1234567890".repeat(40);
+            const compacted = providerAny.compactOpenAiMessages(
+                [
+                    { role: "system", content: "sys" },
+                    { role: "user", content: "start" },
+                    {
+                        role: "assistant",
+                        tool_calls: [{ function: { name: "read_file" } }],
+                    },
+                    {
+                        role: "tool",
+                        name: "read_file",
+                        content: longToolPayload,
+                    },
+                    { role: "user", content: "latest" },
+                ],
+                10000,
+                1,
+                "Conversation summary (auto-compact)"
+            );
+
+            const summary = compacted.find(msg => msg.role === "system" && typeof msg.content === "string" && msg.content.includes("Conversation summary"));
+            assert.ok(summary && typeof summary.content === "string");
+            assert.ok(summary!.content!.includes("[tool_result read_file]"));
+            assert.ok(summary!.content!.includes("[tool_calls] read_file"));
+            assert.ok(!summary!.content!.includes(longToolPayload.slice(0, 80)));
+        });
+
+        test("truncates oversized tool results", () => {
+            const providerAny = provider as unknown as {
+                truncateToolResultMessages: (
+                    messages: Array<{ role: "system" | "user" | "assistant" | "tool"; content?: string }>,
+                    maxChars: number,
+                    requestId: string
+                ) => Array<{ role: string; content?: string }>;
+            };
+
+            const longToolPayload = "tool-output-".repeat(200);
+            const truncated = providerAny.truncateToolResultMessages(
+                [{ role: "tool", content: longToolPayload }],
+                120,
+                "test-request"
+            );
+
+            assert.ok(typeof truncated[0].content === "string");
+            assert.ok(truncated[0].content!.length < longToolPayload.length);
+            assert.ok(truncated[0].content!.includes("tool result truncated"));
+        });
+
+        test("serializes local chat request slots", async () => {
+            const providerAny = provider as unknown as {
+                acquireChatRequestSlot: (
+                    requestId: string,
+                    queueTimeoutMs: number,
+                    token: vscode.CancellationToken
+                ) => Promise<{ release: () => void; waitMs: number }>;
+            };
+            const token = new vscode.CancellationTokenSource().token;
+            const firstLease = await providerAny.acquireChatRequestSlot("first", 0, token);
+            let secondAcquired = false;
+            const secondSlot = providerAny.acquireChatRequestSlot("second", 0, token).then(lease => {
+                secondAcquired = true;
+                return lease;
+            });
+
+            await Promise.resolve();
+            assert.strictEqual(secondAcquired, false);
+
+            firstLease.release();
+            const secondLease = await secondSlot;
+            assert.strictEqual(secondAcquired, true);
+            secondLease.release();
+        });
+
+        test("streams <think> blocks as thinking and keeps final visible answer", async () => {
+            const providerAny = provider as unknown as {
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<void>;
+            };
+
+            const encoder = new TextEncoder();
+            const payload =
+                "data: {\"choices\":[{\"delta\":{\"content\":\"<think>reasoning path</think>final answer\"}}]}\n\n" +
+                "data: [DONE]\n\n";
+            const stream = new ReadableStream<Uint8Array>({
+                start(controller) {
+                    controller.enqueue(encoder.encode(payload));
+                    controller.close();
+                },
+            });
+
+            const parts: vscode.LanguageModelResponsePart[] = [];
+            await providerAny.processStreamingResponse(
+                stream,
+                {
+                    report: part => parts.push(part),
+                },
+                new vscode.CancellationTokenSource().token
+            );
+
+            const text = parts
+                .filter((part): part is vscode.LanguageModelTextPart => part instanceof vscode.LanguageModelTextPart)
+                .map(part => part.value)
+                .join("");
+            const hasThinkingPart = parts.some(part => (part as { constructor?: { name?: string } }).constructor?.name === "LanguageModelThinkingPart");
+            const hasNonTextPart = parts.some(part => !(part instanceof vscode.LanguageModelTextPart));
+
+            assert.ok(text.includes("final answer"));
+            assert.ok(!text.includes("<think>"));
+            assert.ok(hasThinkingPart || hasNonTextPart || text.includes("reasoning path"));
+        });
+
+        test("streams reasoning_content deltas as thinking when available", async () => {
+            const providerAny = provider as unknown as {
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<void>;
+            };
+
+            const encoder = new TextEncoder();
+            const payload =
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"step 1 -> step 2\"}}]}\n\n" +
+                "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n" +
+                "data: [DONE]\n\n";
+            const stream = new ReadableStream<Uint8Array>({
+                start(controller) {
+                    controller.enqueue(encoder.encode(payload));
+                    controller.close();
+                },
+            });
+
+            const parts: vscode.LanguageModelResponsePart[] = [];
+            await providerAny.processStreamingResponse(
+                stream,
+                {
+                    report: part => parts.push(part),
+                },
+                new vscode.CancellationTokenSource().token
+            );
+
+            const text = parts
+                .filter((part): part is vscode.LanguageModelTextPart => part instanceof vscode.LanguageModelTextPart)
+                .map(part => part.value)
+                .join("");
+            const hasThinkingPart = parts.some(part => (part as { constructor?: { name?: string } }).constructor?.name === "LanguageModelThinkingPart");
+            const hasNonTextPart = parts.some(part => !(part instanceof vscode.LanguageModelTextPart));
+
+            assert.ok(text.includes("done"));
+            assert.ok(hasThinkingPart || hasNonTextPart || text.includes("step 1 -> step 2"));
+        });
+
+        test("flushes buffered tool calls when stream ends without DONE", async () => {
+            const providerAny = provider as unknown as {
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<void>;
+            };
+
+            const encoder = new TextEncoder();
+            const payload =
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}]}}]}\n\n";
+            const stream = new ReadableStream<Uint8Array>({
+                start(controller) {
+                    controller.enqueue(encoder.encode(payload));
+                    controller.close();
+                },
+            });
+
+            const parts: vscode.LanguageModelResponsePart[] = [];
+            await providerAny.processStreamingResponse(
+                stream,
+                {
+                    report: part => parts.push(part),
+                },
+                new vscode.CancellationTokenSource().token
+            );
+
+            const toolCalls = parts.filter(
+                (part): part is vscode.LanguageModelToolCallPart => part instanceof vscode.LanguageModelToolCallPart
+            );
+
+            assert.strictEqual(toolCalls.length, 1);
+            assert.strictEqual(toolCalls[0].name, "read_file");
+            assert.deepStrictEqual(toolCalls[0].input, { path: "README.md" });
+        });
+
+        test("processes final SSE line without trailing newline", async () => {
+            const providerAny = provider as unknown as {
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<void>;
+            };
+
+            const encoder = new TextEncoder();
+            const stream = new ReadableStream<Uint8Array>({
+                start(controller) {
+                    controller.enqueue(
+                        encoder.encode(
+                            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_tail\",\"function\":{\"name\":\"list_dir\",\"arguments\":\"{\\\"path\\\":\\\"src\\\"}\"}}]}}]}"
+                        )
+                    );
+                    controller.close();
+                },
+            });
+
+            const parts: vscode.LanguageModelResponsePart[] = [];
+            await providerAny.processStreamingResponse(
+                stream,
+                {
+                    report: part => parts.push(part),
+                },
+                new vscode.CancellationTokenSource().token
+            );
+
+            const toolCalls = parts.filter(
+                (part): part is vscode.LanguageModelToolCallPart => part instanceof vscode.LanguageModelToolCallPart
+            );
+
+            assert.strictEqual(toolCalls.length, 1);
+            assert.strictEqual(toolCalls[0].name, "list_dir");
+            assert.deepStrictEqual(toolCalls[0].input, { path: "src" });
+        });
+
+        test("flushes multiple buffered tool calls at stream end", async () => {
+            const providerAny = provider as unknown as {
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<void>;
+            };
+
+            const encoder = new TextEncoder();
+            const payload =
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"grep_search\",\"arguments\":\"{\\\"query\\\":\\\"abc\\\"}\"}},{\"index\":1,\"id\":\"call_b\",\"function\":{\"name\":\"list_dir\",\"arguments\":\"{\\\"path\\\":\\\"src\\\"}\"}}]}}]}";
+            const stream = new ReadableStream<Uint8Array>({
+                start(controller) {
+                    controller.enqueue(encoder.encode(payload));
+                    controller.close();
+                },
+            });
+
+            const parts: vscode.LanguageModelResponsePart[] = [];
+            await providerAny.processStreamingResponse(
+                stream,
+                {
+                    report: part => parts.push(part),
+                },
+                new vscode.CancellationTokenSource().token
+            );
+
+            const toolCalls = parts.filter(
+                (part): part is vscode.LanguageModelToolCallPart => part instanceof vscode.LanguageModelToolCallPart
+            );
+
+            assert.strictEqual(toolCalls.length, 2);
+            assert.deepStrictEqual(
+                toolCalls.map(call => ({ name: call.name, input: call.input })),
+                [
+                    { name: "grep_search", input: { query: "abc" } },
+                    { name: "list_dir", input: { path: "src" } },
+                ]
+            );
+        });
+
+        test("auto-retries continuation when model returns empty output", async () => {
+            const providerAny = provider as unknown as {
+                getServerUrl: () => Promise<string>;
+                getApiKey: () => Promise<string | undefined>;
+                getRuntimeContextLengthWithCache: () => Promise<number | undefined>;
+                acquireChatRequestSlot: (
+                    requestId: string,
+                    queueTimeoutMs: number,
+                    token: vscode.CancellationToken
+                ) => Promise<{ release: () => void; waitMs: number }>;
+                sendChatCompletion: (
+                    serverUrl: string,
+                    headers: Record<string, string>,
+                    requestBody: Record<string, unknown>,
+                    timeoutMs: number,
+                    token: vscode.CancellationToken
+                ) => Promise<Response>;
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<void>;
+            };
+
+            const originalGetServerUrl = providerAny.getServerUrl;
+            const originalGetApiKey = providerAny.getApiKey;
+            const originalGetRuntimeContextLengthWithCache = providerAny.getRuntimeContextLengthWithCache;
+            const originalAcquireChatRequestSlot = providerAny.acquireChatRequestSlot;
+            const originalSendChatCompletion = providerAny.sendChatCompletion;
+            const originalProcessStreamingResponse = providerAny.processStreamingResponse;
+
+            const sentRequestBodies: Array<Record<string, unknown>> = [];
+            const reportedParts: vscode.LanguageModelResponsePart[] = [];
+            let streamInvocation = 0;
+
+            const emptyResponse = () =>
+                new Response(
+                    new ReadableStream<Uint8Array>({
+                        start(controller) {
+                            controller.close();
+                        },
+                    }),
+                    { status: 200 }
+                );
+
+            try {
+                providerAny.getServerUrl = async () => "http://localhost:8000";
+                providerAny.getApiKey = async () => undefined;
+                providerAny.getRuntimeContextLengthWithCache = async () => 65536;
+                providerAny.acquireChatRequestSlot = async () => ({ release: () => undefined, waitMs: 0 });
+                providerAny.sendChatCompletion = async (
+                    _serverUrl,
+                    _headers,
+                    requestBody,
+                    _timeoutMs,
+                    _token
+                ) => {
+                    sentRequestBodies.push(JSON.parse(JSON.stringify(requestBody)) as Record<string, unknown>);
+                    return emptyResponse();
+                };
+                providerAny.processStreamingResponse = async (_responseBody, progress, _token) => {
+                    streamInvocation += 1;
+                    if (streamInvocation === 2) {
+                        progress.report(new vscode.LanguageModelTextPart("Recovered response"));
+                    }
+                };
+
+                await provider.provideLanguageModelChatResponse(
+                    {
+                        id: "test-model",
+                        name: "test-model",
+                        family: "llama",
+                        version: "1",
+                        maxInputTokens: 32768,
+                        maxOutputTokens: 4096,
+                        capabilities: {},
+                    } as unknown as vscode.LanguageModelChatInformation,
+                    [vscode.LanguageModelChatMessage.User("Explain this")],
+                    {
+                        modelOptions: {},
+                        tools: [],
+                        toolMode: vscode.LanguageModelChatToolMode.Auto,
+                    },
+                    {
+                        report: part => reportedParts.push(part),
+                    },
+                    new vscode.CancellationTokenSource().token
+                );
+            } finally {
+                providerAny.getServerUrl = originalGetServerUrl;
+                providerAny.getApiKey = originalGetApiKey;
+                providerAny.getRuntimeContextLengthWithCache = originalGetRuntimeContextLengthWithCache;
+                providerAny.acquireChatRequestSlot = originalAcquireChatRequestSlot;
+                providerAny.sendChatCompletion = originalSendChatCompletion;
+                providerAny.processStreamingResponse = originalProcessStreamingResponse;
+            }
+
+            assert.strictEqual(sentRequestBodies.length, 2, "expected one auto-retry request");
+
+            const secondMessages = sentRequestBodies[1].messages as Array<{ role?: string; content?: string }>;
+            const lastMessage = secondMessages[secondMessages.length - 1];
+            assert.strictEqual(lastMessage.role, "user");
+            assert.ok(
+                (lastMessage.content ?? "").includes("Continue from your previous response"),
+                "expected continuation prompt to be appended"
+            );
+
+            const textParts = reportedParts.filter(
+                (part): part is vscode.LanguageModelTextPart => part instanceof vscode.LanguageModelTextPart
+            );
+            assert.strictEqual(textParts.length, 1);
+            assert.strictEqual(textParts[0].value, "Recovered response");
+        });
     });
 
     suite("utils/convertMessages", () => {
@@ -284,6 +687,45 @@ suite("Llama.cpp Chat Provider Extension", () => {
 			} satisfies vscode.ProvideLanguageModelChatResponseOptions);
 			assert.deepEqual(out.tool_choice, { type: "function", function: { name: "only_tool" } });
 		});
+
+        test("convertTools suppresses run_vscode_command when run_in_terminal exists", () => {
+            const out = convertTools({
+                toolMode: vscode.LanguageModelChatToolMode.Auto,
+                tools: [
+                    {
+                        name: "run_vscode_command",
+                        description: "Run a VS Code command",
+                        inputSchema: { type: "object", properties: {} },
+                    },
+                    {
+                        name: "run_in_terminal",
+                        description: "Run a terminal command",
+                        inputSchema: { type: "object", properties: {} },
+                    },
+                ],
+            } satisfies vscode.ProvideLanguageModelChatResponseOptions);
+
+            const names = (out.tools ?? []).map(t => t.function.name);
+            assert.ok(names.includes("run_in_terminal"));
+            assert.ok(!names.includes("run_vscode_command"));
+        });
+
+        test("convertTools keeps run_vscode_command in required mode", () => {
+            const out = convertTools({
+                toolMode: vscode.LanguageModelChatToolMode.Required,
+                tools: [
+                    {
+                        name: "run_vscode_command",
+                        description: "Run a VS Code command",
+                        inputSchema: { type: "object", properties: {} },
+                    },
+                ],
+            } satisfies vscode.ProvideLanguageModelChatResponseOptions);
+
+            const names = (out.tools ?? []).map(t => t.function.name);
+            assert.deepEqual(names, ["run_vscode_command"]);
+            assert.deepEqual(out.tool_choice, { type: "function", function: { name: "run_vscode_command" } });
+        });
     });
 
     suite("utils/validation", () => {

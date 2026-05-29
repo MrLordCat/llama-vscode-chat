@@ -1,0 +1,82 @@
+{
+  "generatedAt": "2026-05-29T07:42:37.214Z",
+  "source": {
+    "inputPath": "C:\\Users\\Chris\\Documents\\GitHub\\llama-vscode-chat\\logs.log",
+    "parsedLines": 138,
+    "invalidLines": 1,
+    "totalRawLines": 140,
+    "modelFilter": "qwen"
+  },
+  "summary": {
+    "totalRequestsSeen": 4,
+    "completedTurns": 2,
+    "turnsWithTokenEstimates": 2,
+    "avgAttempts": 1,
+    "continuationRetryRatePct": 0,
+    "overflowRetryRatePct": 0,
+    "autoCompactRatePct": 0,
+    "hardCompactRatePct": 0,
+    "estimatedInputTokens": {
+      "avg": 27662,
+      "median": 23172,
+      "p95": 32152
+    },
+    "estimatedOutputTokens": {
+      "avg": 93,
+      "median": 88,
+      "p95": 98
+    },
+    "estimatedTotalTokens": {
+      "avg": 27755,
+      "median": 23270,
+      "p95": 32240
+    },
+    "performance": {
+      "durationMs": {
+        "avg": 86101.4,
+        "median": 68651.48,
+        "p95": 103551.33
+      },
+      "queueWaitMs": {
+        "avg": 0,
+        "median": 0,
+        "p95": 0
+      },
+      "tokensPerSecond": {
+        "avg": 16.92,
+        "median": 16.31,
+        "p95": 17.54
+      }
+    }
+  },
+  "turns": [
+    {
+      "requestId": "aa0d7712-8ea5-4de5-94f3-6992ea6d884b",
+      "modelId": "Qwen3.6-27B-Q3_K_S.gguf",
+      "attempts": 1,
+      "continuationRetryCount": 0,
+      "retriedAfterOverflow": false,
+      "autoCompacted": false,
+      "hardCompacted": false,
+      "estimatedInputTokens": 23172,
+      "estimatedOutputTokens": 98,
+      "estimatedTotalTokens": 23270,
+      "durationMs": 68651.48,
+      "tokensPerSecond": 16.31083253984462
+    },
+    {
+      "requestId": "ef4f01b7-faa4-4687-bf96-bfd3df4f57b6",
+      "modelId": "Qwen3.6-27B-Q3_K_S.gguf",
+      "attempts": 1,
+      "continuationRetryCount": 0,
+      "retriedAfterOverflow": false,
+      "autoCompacted": false,
+      "hardCompacted": false,
+      "estimatedInputTokens": 32152,
+      "estimatedOutputTokens": 88,
+      "estimatedTotalTokens": 32240,
+      "durationMs": 103551.327,
+      "tokensPerSecond": 17.536147380159363
+    }
+  ]
+}

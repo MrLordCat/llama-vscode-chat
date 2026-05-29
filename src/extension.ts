@@ -1,12 +1,73 @@
 
 import * as vscode from "vscode";
 
-import { LlamaCppChatModelProvider } from "./llama-provider";
+import {
+	LlamaCppChatModelProvider,
+	type LlamaChatContextUsageMetrics,
+	type LlamaChatTurnMetrics,
+} from "./llama-provider";
+import { LlamaLogService } from "./logger";
 
 const EXTENSION_ID = "maruf-bepary.llama-vscode-chat";
+const DEFAULT_SERVER_URL = "http://localhost:8000";
 
 type ThinkingMode = "off" | "light" | "balanced" | "deep" | "auto";
 type ToolResultMode = "auto" | "tool" | "user";
+
+type ContextUsageDisplay = {
+	summary: string;
+	breakdown: string;
+	statusBarText: string;
+	tooltip: string;
+	tooltipLines: string[];
+};
+
+function formatNumber(value: number): string {
+	if (!Number.isFinite(value)) {
+		return "0";
+	}
+	return Math.max(0, Math.round(value)).toLocaleString("en-US");
+}
+
+function formatPercent(value: number): string {
+	if (!Number.isFinite(value)) {
+		return "0.0";
+	}
+	return value.toFixed(1);
+}
+
+function formatContextUsage(metrics: LlamaChatContextUsageMetrics): ContextUsageDisplay {
+	const usedTokens = Math.max(0, metrics.estimatedUsedTokens);
+	const freeTokens = Math.max(0, metrics.estimatedFreeTokens);
+	const usagePercent = Math.min(100, Math.max(0, metrics.estimatedUsagePercent));
+	const compaction = [metrics.autoCompacted ? "auto" : undefined, metrics.hardCompacted ? "hard" : undefined]
+		.filter((value): value is string => typeof value === "string")
+		.join("+") || "none";
+
+	const summary = `${formatPercent(usagePercent)}% (${formatNumber(usedTokens)}/${formatNumber(metrics.contextLength)})`;
+	const breakdown = `msg ${formatNumber(metrics.messageTokensAfterCompact)} + tools ${formatNumber(metrics.toolTokens)} + reserved ${formatNumber(metrics.replyReserveTokens)}`;
+	const tooltipLines = [
+		`Model: ${metrics.modelId}`,
+		`Usage: ${summary}`,
+		`Messages: ${formatNumber(metrics.messageTokensAfterCompact)} (before ${formatNumber(metrics.messageTokensBeforeCompact)})`,
+		`Tools: ${formatNumber(metrics.toolTokens)} (count ${metrics.cappedTools})`,
+		`Reserved reply: ${formatNumber(metrics.replyReserveTokens)}`,
+		`Input budget: ${formatNumber(metrics.inputBudget)}`,
+		`Soft target: ${formatNumber(metrics.softInputTarget)}`,
+		`Hard target: ${formatNumber(metrics.hardInputTarget)}`,
+		`Free headroom: ${formatNumber(freeTokens)}`,
+		`Compaction: ${compaction}`,
+		`Attempt: #${metrics.attemptNo}`,
+	];
+
+	return {
+		summary,
+		breakdown,
+		statusBarText: `$(pie-chart) llama.cpp ctx ${usagePercent.toFixed(0)}%`,
+		tooltip: tooltipLines.join("\n"),
+		tooltipLines,
+	};
+}
 
 class QuickActionItem extends vscode.TreeItem {
 	constructor(label: string, description: string | undefined, command: vscode.Command) {
@@ -21,6 +82,11 @@ class LlamaQuickActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 	private readonly _onDidChangeTreeData = new vscode.EventEmitter<void>();
 	readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
+	constructor(
+		private readonly getLastThroughput: () => string | undefined,
+		private readonly getLastContextUsage: () => ContextUsageDisplay | undefined
+	) {}
+
 	refresh(): void {
 		this._onDidChangeTreeData.fire();
 	}
@@ -31,16 +97,35 @@ class LlamaQuickActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 
 	getChildren(): vscode.ProviderResult<vscode.TreeItem[]> {
 		const config = vscode.workspace.getConfiguration("llamacpp");
+		const serverUrl = String(config.get("serverUrl", DEFAULT_SERVER_URL) || DEFAULT_SERVER_URL);
 		const thinkingMode = String(config.get("thinkingMode", "auto"));
 		const reasoningBudget = Number(config.get("reasoningBudget", 2048));
 		const toolResultMode = String(config.get("toolResultMode", "auto"));
+		const fileLoggingEnabled = config.get<boolean>("enableFileLogging", true) !== false;
+		const streamChunkLoggingEnabled = config.get<boolean>("logStreamChunks", false) === true;
+		const performanceStatusBarEnabled = config.get<boolean>("showPerformanceStatusBar", true) !== false;
+		const contextUsageStatusBarEnabled = config.get<boolean>("showContextUsageStatusBar", true) !== false;
+		const lastThroughput = this.getLastThroughput();
+		const lastContextUsage = this.getLastContextUsage();
 
 		return [
 			new QuickActionItem("Open Llama.cpp Sidebar", undefined, {
 				title: "Open Llama.cpp Sidebar",
 				command: "llamacpp.openSidebar",
 			}),
+			new QuickActionItem("Refresh Models", undefined, {
+				title: "Llama.cpp: Refresh Models",
+				command: "llamacpp.refreshModels",
+			}),
+			new QuickActionItem("Open Copilot Model Picker", undefined, {
+				title: "Open Copilot Model Picker",
+				command: "llamacpp.openCopilotModelPicker",
+			}),
 			new QuickActionItem("Manage Server URL", undefined, {
+				title: "Manage Llama.cpp Provider",
+				command: "llamacpp.manage",
+			}),
+			new QuickActionItem("Server URL", serverUrl, {
 				title: "Manage Llama.cpp Provider",
 				command: "llamacpp.manage",
 			}),
@@ -60,8 +145,59 @@ class LlamaQuickActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 				title: "Set Tool Result Mode",
 				command: "llamacpp.setToolResultMode",
 			}),
+			new QuickActionItem("Open Logs Folder", undefined, {
+				title: "Llama.cpp: Open Logs Folder",
+				command: "llamacpp.openLogsFolder",
+			}),
+			new QuickActionItem("Open Latest Log", undefined, {
+				title: "Llama.cpp: Open Latest Log",
+				command: "llamacpp.openLatestLog",
+			}),
+			new QuickActionItem("Copy Latest Log Path", undefined, {
+				title: "Llama.cpp: Copy Latest Log Path",
+				command: "llamacpp.copyLatestLogPath",
+			}),
+			new QuickActionItem("File Logging", fileLoggingEnabled ? "on" : "off", {
+				title: "Llama.cpp: Toggle File Logging",
+				command: "llamacpp.toggleFileLogging",
+			}),
+			new QuickActionItem("Stream Chunk Logging", streamChunkLoggingEnabled ? "on" : "off", {
+				title: "Llama.cpp: Toggle Stream Chunk Logging",
+				command: "llamacpp.toggleStreamChunkLogging",
+			}),
+			new QuickActionItem("Performance Status Bar", performanceStatusBarEnabled ? "on" : "off", {
+				title: "Llama.cpp: Toggle Performance Status Bar",
+				command: "llamacpp.togglePerformanceStatusBar",
+			}),
+			new QuickActionItem("Context Usage Status Bar", contextUsageStatusBarEnabled ? "on" : "off", {
+				title: "Llama.cpp: Toggle Context Usage Status Bar",
+				command: "llamacpp.toggleContextUsageStatusBar",
+			}),
+			new QuickActionItem("Last Throughput", lastThroughput ?? "n/a", {
+				title: "Llama.cpp: Open Latest Log",
+				command: "llamacpp.openLatestLog",
+			}),
+			new QuickActionItem("Context Usage", lastContextUsage?.summary ?? "n/a", {
+				title: "Llama.cpp: Open Latest Log",
+				command: "llamacpp.openLatestLog",
+			}),
+			new QuickActionItem("Context Breakdown", lastContextUsage?.breakdown ?? "n/a", {
+				title: "Llama.cpp: Open Latest Log",
+				command: "llamacpp.openLatestLog",
+			}),
 		];
 	}
+}
+
+function getExplicitConfiguredServerUrl(config: vscode.WorkspaceConfiguration): string | undefined {
+	const inspected = config.inspect<string>("serverUrl");
+	const candidates = [inspected?.workspaceFolderValue, inspected?.workspaceValue, inspected?.globalValue];
+	for (const candidate of candidates) {
+		if (typeof candidate === "string" && candidate.trim().length > 0) {
+			return candidate.trim();
+		}
+	}
+	return undefined;
 }
 
 async function pickThinkingMode(current: ThinkingMode): Promise<ThinkingMode | undefined> {
@@ -178,12 +314,85 @@ export function activate(context: vscode.ExtensionContext) {
 	const vscodeVersion = vscode.version;
 	// Keep UA minimal: only extension version and VS Code version
 	const ua = `llama-vscode-chat/${extVersion} VSCode/${vscodeVersion}`;
+	const logService = new LlamaLogService(context);
+	context.subscriptions.push(logService);
+	void logService.initialize();
 
 	// Llama.cpp Provider
-	const llamaProvider = new LlamaCppChatModelProvider(context.secrets, ua);
+	const llamaProvider = new LlamaCppChatModelProvider(context.secrets, ua, logService);
 	context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider("llamacpp", llamaProvider));
-	const quickActionsProvider = new LlamaQuickActionsProvider();
+	let lastThroughput: string | undefined;
+	let lastContextUsage: ContextUsageDisplay | undefined;
+	const quickActionsProvider = new LlamaQuickActionsProvider(() => lastThroughput, () => lastContextUsage);
 	context.subscriptions.push(vscode.window.registerTreeDataProvider("llamacpp-quick-actions", quickActionsProvider));
+	llamaProvider.refreshLanguageModelChatInformation();
+
+	const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 95);
+	performanceStatusBar.name = "Llama.cpp Throughput";
+	performanceStatusBar.command = "llamacpp.openLatestLog";
+	performanceStatusBar.text = "$(dashboard) llama.cpp TPS: n/a";
+
+	const contextUsageStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 94);
+	contextUsageStatusBar.name = "Llama.cpp Context Usage";
+	contextUsageStatusBar.command = "llamacpp.openLatestLog";
+	contextUsageStatusBar.text = "$(pie-chart) llama.cpp ctx: n/a";
+
+	const updatePerformanceStatusBarVisibility = (): void => {
+		const enabled = vscode.workspace.getConfiguration("llamacpp").get<boolean>("showPerformanceStatusBar", true) !== false;
+		if (enabled) {
+			performanceStatusBar.show();
+		} else {
+			performanceStatusBar.hide();
+		}
+	};
+
+	const updateContextUsageStatusBarVisibility = (): void => {
+		const enabled = vscode.workspace.getConfiguration("llamacpp").get<boolean>("showContextUsageStatusBar", true) !== false;
+		if (enabled) {
+			contextUsageStatusBar.show();
+		} else {
+			contextUsageStatusBar.hide();
+		}
+	};
+
+	updatePerformanceStatusBarVisibility();
+	updateContextUsageStatusBarVisibility();
+	context.subscriptions.push(performanceStatusBar);
+	context.subscriptions.push(contextUsageStatusBar);
+
+	context.subscriptions.push(
+		llamaProvider.onDidUpdateContextUsage((usage: LlamaChatContextUsageMetrics) => {
+			lastContextUsage = formatContextUsage(usage);
+			contextUsageStatusBar.text = lastContextUsage.statusBarText;
+			contextUsageStatusBar.tooltip = lastContextUsage.tooltip;
+			quickActionsProvider.refresh();
+		})
+	);
+
+	context.subscriptions.push(
+		llamaProvider.onDidCompleteChatTurn((metrics: LlamaChatTurnMetrics) => {
+			const tpsText = metrics.tokensPerSecond === undefined ? "n/a" : `${metrics.tokensPerSecond.toFixed(1)} tok/s`;
+			const latencyText = metrics.firstTokenLatencyMs === undefined ? "n/a" : `${metrics.firstTokenLatencyMs} ms`;
+			const queueText = `${metrics.queueWaitMs} ms`;
+			const performanceTooltipLines = [
+				`Model: ${metrics.modelId}`,
+				`TPS: ${tpsText}`,
+				`Estimated output tokens: ${metrics.estimatedOutputTokens}`,
+				`Thinking chars: ${metrics.thinkingChars}`,
+				`First token latency: ${latencyText}`,
+				`Queue wait: ${queueText}`,
+				`Turn duration: ${metrics.durationMs} ms`,
+			];
+			if (lastContextUsage) {
+				performanceTooltipLines.push("", ...lastContextUsage.tooltipLines);
+			}
+
+			lastThroughput = tpsText;
+			performanceStatusBar.text = `$(dashboard) llama.cpp ${tpsText}`;
+			performanceStatusBar.tooltip = performanceTooltipLines.join("\n");
+			quickActionsProvider.refresh();
+		})
+	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.openSidebar", async () => {
@@ -196,11 +405,13 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.manage", async () => {
-			const existingUrl = await context.secrets.get("llamacpp.serverUrl");
+			const config = vscode.workspace.getConfiguration("llamacpp");
+			const configuredUrl = getExplicitConfiguredServerUrl(config);
+			const existingUrl = configuredUrl || (await context.secrets.get("llamacpp.serverUrl"));
 			const serverUrl = await vscode.window.showInputBox({
 				title: "Llama.cpp Server URL",
 				prompt: "Enter the URL of your Llama.cpp server",
-				value: existingUrl || "http://localhost:8080",
+				value: existingUrl || DEFAULT_SERVER_URL,
 				ignoreFocusOut: true,
 			});
 
@@ -209,11 +420,14 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 
 			if (serverUrl.trim()) {
-				await context.secrets.store("llamacpp.serverUrl", serverUrl.trim());
+				await config.update("serverUrl", serverUrl.trim(), vscode.ConfigurationTarget.Global);
+				await context.secrets.delete("llamacpp.serverUrl");
 			} else {
+				await config.update("serverUrl", undefined, vscode.ConfigurationTarget.Global);
 				await context.secrets.delete("llamacpp.serverUrl");
 			}
 
+			llamaProvider.refreshLanguageModelChatInformation();
 			quickActionsProvider.refresh();
 			vscode.window.showInformationMessage("Llama.cpp configuration saved.");
 		})
@@ -289,8 +503,129 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.refreshModels", async () => {
+			llamaProvider.refreshLanguageModelChatInformation();
+			quickActionsProvider.refresh();
+			vscode.window.showInformationMessage("Llama.cpp models refreshed.");
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.openCopilotModelPicker", async () => {
+			const candidates = [
+				"github.copilot.chat.openModelPicker",
+				"workbench.action.chat.openModelPicker",
+			];
+
+			for (const commandId of candidates) {
+				try {
+					await vscode.commands.executeCommand(commandId);
+					return;
+				} catch {
+					// Keep trying fallback command ids.
+				}
+			}
+
+			const allCommands = await vscode.commands.getCommands(true);
+			const dynamicCandidate = allCommands.find(
+				command => command.toLowerCase().includes("modelpicker") && command.includes("copilot")
+			);
+			if (dynamicCandidate) {
+				try {
+					await vscode.commands.executeCommand(dynamicCandidate);
+					return;
+				} catch {
+					// Fall through to warning message.
+				}
+			}
+
+			vscode.window.showWarningMessage("Unable to open the Copilot model picker automatically.");
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.openLogsFolder", async () => {
+			await logService.openLogsFolder();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.openLatestLog", async () => {
+			await logService.openLatestLogFile();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.copyLatestLogPath", async () => {
+			await logService.copyLatestLogPath();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.toggleFileLogging", async () => {
+			const config = vscode.workspace.getConfiguration("llamacpp");
+			const current = config.get<boolean>("enableFileLogging", true) !== false;
+			const next = !current;
+			await config.update("enableFileLogging", next, vscode.ConfigurationTarget.Global);
+			quickActionsProvider.refresh();
+			vscode.window.showInformationMessage(`Llama.cpp file logging: ${next ? "on" : "off"}`);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.toggleStreamChunkLogging", async () => {
+			const config = vscode.workspace.getConfiguration("llamacpp");
+			const current = config.get<boolean>("logStreamChunks", false) === true;
+			const next = !current;
+			await config.update("logStreamChunks", next, vscode.ConfigurationTarget.Global);
+			quickActionsProvider.refresh();
+			vscode.window.showInformationMessage(`Llama.cpp stream chunk logging: ${next ? "on" : "off"}`);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.togglePerformanceStatusBar", async () => {
+			const config = vscode.workspace.getConfiguration("llamacpp");
+			const current = config.get<boolean>("showPerformanceStatusBar", true) !== false;
+			const next = !current;
+			await config.update("showPerformanceStatusBar", next, vscode.ConfigurationTarget.Global);
+			updatePerformanceStatusBarVisibility();
+			quickActionsProvider.refresh();
+			vscode.window.showInformationMessage(`Llama.cpp performance status bar: ${next ? "on" : "off"}`);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.toggleContextUsageStatusBar", async () => {
+			const config = vscode.workspace.getConfiguration("llamacpp");
+			const current = config.get<boolean>("showContextUsageStatusBar", true) !== false;
+			const next = !current;
+			await config.update("showContextUsageStatusBar", next, vscode.ConfigurationTarget.Global);
+			updateContextUsageStatusBarVisibility();
+			quickActionsProvider.refresh();
+			vscode.window.showInformationMessage(`Llama.cpp context usage status bar: ${next ? "on" : "off"}`);
+		})
+	);
+
+	context.subscriptions.push(
 		vscode.workspace.onDidChangeConfiguration(event => {
 			if (event.affectsConfiguration("llamacpp")) {
+				if (event.affectsConfiguration("llamacpp.showPerformanceStatusBar")) {
+					updatePerformanceStatusBarVisibility();
+				}
+				if (event.affectsConfiguration("llamacpp.showContextUsageStatusBar")) {
+					updateContextUsageStatusBarVisibility();
+				}
+				if (
+					event.affectsConfiguration("llamacpp.serverUrl") ||
+					event.affectsConfiguration("llamacpp.contextLength") ||
+					event.affectsConfiguration("llamacpp.maxOutputTokensCap") ||
+					event.affectsConfiguration("llamacpp.maxToolsPerRequest") ||
+					event.affectsConfiguration("llamacpp.modelFamily") ||
+					event.affectsConfiguration("llamacpp.modelListCacheTtlMs")
+				) {
+					llamaProvider.refreshLanguageModelChatInformation();
+				}
 				quickActionsProvider.refresh();
 			}
 		})
