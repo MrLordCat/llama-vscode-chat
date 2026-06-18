@@ -1,245 +1,339 @@
-# Llama.cpp Provider for GitHub Copilot Chat
+# Llama.cpp Chat Provider for VS Code
 
-This extension connects OpenAI-compatible Llama.cpp endpoints to VS Code Chat.
+Personal fork focused on making VS Code Chat work well with OpenAI-compatible
+local llama.cpp servers and the official DeepSeek API.
 
-## Features
+The extension registers a `llamacpp` language model provider for VS Code Chat,
+so GitHub Copilot Chat and agent workflows can use local or remote models while
+keeping tool calling, streaming responses, context budgeting, and diagnostics.
 
-- Streaming chat responses.
-- Tool calling with compatibility fallback for strict chat templates.
-- Context-aware compaction and overflow retry.
-- Thinking controls for compatible models (for example Qwen):
-  - `thinkingMode`
-  - `reasoningBudget`
-- Streaming thinking visibility from `reasoning`, `reasoning_content`, and `<think>...</think>` chunks (with fallback text mode on older VS Code APIs).
-- Quick Actions view in the Activity Bar.
-- Throughput telemetry for each turn (estimated tokens/sec, first-token latency, queue wait).
-- Optional status bar throughput indicator with latest turn metrics.
-- Optional context-usage status bar with budget breakdown (`messages`, `tools`, `reserved`, free headroom).
-- Full JSONL request/response logs with quick access commands.
+## Goals
 
-## Requirements
+- Use a local llama.cpp server efficiently from VS Code Chat.
+- Support DeepSeek V4 Pro / Flash through the official OpenAI-compatible API.
+- Keep tool calling usable for coding-agent workflows.
+- Reduce prompt/tool token overhead with API Direct mode.
+- Avoid long-session stalls from huge tool results, stream spam, or oversized
+  request logs.
+- Provide enough logging and status information to debug model/provider issues.
 
-- VS Code 1.104.0 or newer.
-- Running Llama.cpp server with OpenAI-compatible API:
-  - `GET /v1/models`
-  - `POST /v1/chat/completions`
+## Main Features
 
-DeepSeek API uses official OpenAI-format endpoints:
+- OpenAI-compatible chat completions:
+  - llama.cpp: `GET /v1/models`, `POST /v1/chat/completions`
+  - DeepSeek: `GET /models`, `POST /chat/completions`
+- Streaming text responses with chunk coalescing to reduce VS Code UI stalls.
+- Tool calling with OpenAI `tools` and `tool` result messages.
+- API Direct tool mode for compact tool schemas and prioritized tool selection.
+- DeepSeek thinking-mode support:
+  - `thinking.type`
+  - `reasoning_effort`
+  - streamed `reasoning_content`
+  - preservation of `reasoning_content` for assistant tool-call turns
+- Context budgeting, auto-compaction, and context-overflow retry.
+- Large tool-result truncation or summarization.
+- Tool-result artifact sanitization for transient metadata blobs.
+- Request queueing for single-slot local llama.cpp generation.
+- Optional JSONL file logging.
+- Status bar metrics for throughput and context usage.
+- Quick Access sidebar commands for configuration and diagnostics.
 
-- `GET /models`
-- `POST /chat/completions`
+## Quick Start: Local llama.cpp
 
-## Quick Start
+Start llama.cpp with an OpenAI-compatible server, for example:
 
-1. Open command palette and run `Llama.cpp: Open Sidebar`.
-2. Run `Manage Llama.cpp Provider` and set server URL.
-3. Select a Llama.cpp model in chat model picker.
-4. Start chatting.
+```sh
+llama-server -m path/to/model.gguf --host 127.0.0.1 --port 8000 --ctx-size 65536
+```
 
-### DeepSeek Quick Setup
+Then in VS Code:
 
-1. Open command palette and run `Llama.cpp: Configure DeepSeek`.
-2. Paste your DeepSeek API key when prompted (stored in VS Code Secret Storage).
-3. Open chat model picker and choose `deepseek-v4-pro`.
+1. Run `Llama.cpp: Open Sidebar`.
+2. Run `Manage Llama.cpp Provider`.
+3. Set server URL, for example `http://localhost:8000`.
+4. Run `Llama.cpp: Refresh Models`.
+5. Open the chat model picker and select a `llamacpp` model.
 
-The command applies a max-quality DeepSeek V4 profile:
+Recommended local defaults:
 
-- `contextLength = 1048576`
-- `maxOutputTokensCap = 393216`
-- `thinkingMode = deep` (`reasoning_effort=max`)
-- `toolCallingMode = apiDirect`
-- `apiDirectMaxTools = 128`
-- `apiDirectIncludeAllTools = true`
-- `toolResultMode = auto`
+```json
+{
+  "llamacpp.serverUrl": "http://localhost:8000",
+  "llamacpp.modelFamily": "auto",
+  "llamacpp.contextLength": 65536,
+  "llamacpp.cachePrompt": true,
+  "llamacpp.autoCompact": true,
+  "llamacpp.retryOnContextOverflow": true,
+  "llamacpp.toolCallingMode": "apiDirect",
+  "llamacpp.apiDirectIncludeAllTools": true,
+  "llamacpp.apiDirectMaxTools": 128,
+  "llamacpp.toolResultMode": "auto",
+  "llamacpp.maxOutputTokensCap": 131072
+}
+```
 
-If you need to rotate credentials later, run `Llama.cpp: Set API Key`.
+## Quick Start: DeepSeek
 
-## Configuration
+Run `Llama.cpp: Configure DeepSeek`, paste your DeepSeek API key, then select
+`deepseek-v4-pro` or `deepseek-v4-flash` in the chat model picker.
 
-Main settings are under `llamacpp.*` in VS Code Settings.
+The command applies a max-quality DeepSeek profile:
 
-- Context management:
-  - `serverUrl`
-  - `contextLength` (optional override; if not explicitly set, runtime context is inferred from `/slots` (`n_ctx`) first, then from model metadata)
-  - `modelFamily`
-  - `modelListCacheTtlMs`
-  - `modelDiscoveryTimeoutMs`
-  - `autoCompact`
-  - `retryOnContextOverflow`
-  - `emptyResponseAutoRetry`
-  - `emptyResponseAutoRetryMaxAttempts`
-  - `emptyResponseContinuationPrompt`
-  - `contextUtilization`
-  - `hardContextUtilization`
-  - `compactKeepLastTurns`
-  - `hardCompactKeepLastTurns`
-  - `maxOutputTokensCap`: `128..393216` (default `131072`; set `393216` for maximum DeepSeek V4 output)
-  - `minReplyReserveTokens`
-  - `maxToolsPerRequest`
-  - `requestTimeoutMs`
-  - `requestQueueTimeoutMs`
-  - `cachePrompt`
-  - `maxToolResultChars`
-  - `summarizeLargeToolResults`
-  - `sanitizeToolResultArtifacts`
-- Reasoning:
-  - `thinkingMode`: `auto | off | light | balanced | deep`
-  - `reasoningBudget`: `0..65536`
-  - For DeepSeek endpoints, the provider sends `thinking.type` and `reasoning_effort`:
-    - `off` -> `thinking.type=disabled` and no `reasoning_effort`
-    - `light` / `balanced` / `auto` -> `thinking.type=enabled`, `reasoning_effort=high`
-    - `deep` -> `thinking.type=enabled`, `reasoning_effort=max`
-- Tool-result transport mode:
-  - `toolResultMode`: `auto | tool | user`
-  - `auto` starts with `role=tool` and falls back to `role=user` when backend chat template rejects tool-role messages.
-- Tool calling mode:
-  - `toolCallingMode`: `classic | apiDirect`
-  - `apiDirectMaxTools`: `1..128` (used when `toolCallingMode = apiDirect`)
-  - `apiDirectIncludeAllTools`: `true | false` (when true, includes all available tools up to `apiDirectMaxTools`)
-  - `classic` keeps current full tool catalog behavior.
-  - `apiDirect` sends a compact prioritized tool subset to reduce token overhead while keeping tool calls enabled.
-  - When `run_in_terminal` is available and tool mode is not strict-required, `run_vscode_command` is suppressed to avoid command-execution flows that open VS Code input boxes instead of running shell commands.
-- Logging:
-  - `enableFileLogging`: enable/disable file logs
-  - `logStreamChunks`: include stream chunks when deep diagnostics are needed
-  - `maxLoggedStreamChunkChars`: per-chunk log payload limit
-  - `showPerformanceStatusBar`: show/hide llama.cpp TPS status bar item
-  - `showContextUsageStatusBar`: show/hide llama.cpp context usage status bar item
-  - `maxLogFiles`: automatic retention limit for old logs
+```json
+{
+  "llamacpp.serverUrl": "https://api.deepseek.com",
+  "llamacpp.modelFamily": "deepseek",
+  "llamacpp.contextLength": 1048576,
+  "llamacpp.maxOutputTokensCap": 393216,
+  "llamacpp.thinkingMode": "deep",
+  "llamacpp.toolCallingMode": "apiDirect",
+  "llamacpp.apiDirectMaxTools": 128,
+  "llamacpp.apiDirectIncludeAllTools": true,
+  "llamacpp.toolResultMode": "auto",
+  "llamacpp.requestTimeoutMs": 1200000,
+  "llamacpp.requestQueueTimeoutMs": 1200000
+}
+```
 
-## Logging And Fast Access
+For everyday coding work, `maxOutputTokensCap = 131072` is often a better
+latency/context tradeoff than the full `393216` maximum. The full maximum
+reserves a very large answer budget and can cause earlier history compaction.
 
-To simplify troubleshooting during long chat sessions, the extension now writes detailed JSONL logs for every request.
+## API Direct Tool Mode
 
-- Quick commands:
-  - `Llama.cpp: Refresh Models`
-  - `Llama.cpp: Configure DeepSeek`
-  - `Llama.cpp: Set API Key`
-  - `Llama.cpp: Open Logs Folder`
-  - `Llama.cpp: Open Latest Log`
-  - `Llama.cpp: Copy Latest Log Path`
-  - `Llama.cpp: Toggle Performance Status Bar`
-  - `Llama.cpp: Toggle Context Usage Status Bar`
-- The same actions are also available in the Llama.cpp Quick Access sidebar.
+`toolCallingMode = apiDirect` is the default and is the preferred mode for this
+fork.
 
-Logs include:
+API Direct keeps tool calling enabled while reducing prompt overhead:
 
-- Request configuration and payload (`messages`, tools, budgets, thinking mode).
-- HTTP status/errors and retry/fallback decisions.
-- Optional bounded streaming chunks (when `logStreamChunks = true`).
-- Per-turn performance metrics (`tokensPerSecond`, `firstTokenLatencyMs`, `queueWaitMs`, estimated output tokens, thinking chars).
+- Tool schemas are compacted.
+- Descriptions are shortened.
+- Tools are priority-ordered before applying the cap.
+- `apiDirectMaxTools` controls the final tool count.
+- `apiDirectIncludeAllTools = true` includes all advertised tools up to the cap.
+- `maxToolsPerRequest` applies only to classic mode.
 
-Default logs location is inside extension global storage under `logs/`.
+When `run_in_terminal` is available and tool mode is not strict-required, the
+extension suppresses `create_and_run_task` and `run_vscode_command`. This nudges
+the model toward direct terminal execution instead of VS Code command flows that
+can open input prompts or duplicate shell behavior.
 
-## Recommended Profile For Large Context Agent Work
+Classic mode is still available:
 
-If you use this model as a daily coding agent with long sessions:
+```json
+{
+  "llamacpp.toolCallingMode": "classic"
+}
+```
 
-- Set `serverUrl = http://localhost:8000` when your local server listens on port 8000.
-- Set `contextLength = 65536` for a 64k llama.cpp runtime context.
-- Keep `modelFamily = auto`; Qwen model ids are advertised to VS Code Chat as `qwen`.
-- Keep `modelListCacheTtlMs = 30000` so model discovery is fast and the picker can reuse the last successful list during brief server hiccups.
-- Keep `modelDiscoveryTimeoutMs = 20000` for remote providers (for example DeepSeek) so model loading fails fast instead of hanging on a stalled network call.
-- DeepSeek note: `Llama.cpp: Configure DeepSeek` sets `contextLength = 1048576` for the official 1M-token V4 context. If `/models` does not expose context metadata, provider also falls back to 1M for DeepSeek models unless you explicitly override `contextLength`.
-- Keep `cachePrompt = true` so llama.cpp can reuse its server-side prompt/KV cache for repeated prefixes.
-- Chat completions are serialized through one local request slot. This keeps a single llama.cpp server from running overlapping generations and makes `cache_prompt` much more likely to reuse the same warm prompt prefix.
-- DeepSeek context caching is automatic on the API side; the provider does not send llama.cpp-specific `cache_prompt` to DeepSeek endpoints.
-- Keep `requestQueueTimeoutMs = 1200000` unless you prefer queued requests to fail faster while another local generation is running.
-- Keep `maxToolResultChars = 24000` for coding-agent work. It prevents one huge tool/file result from consuming most of the prompt; set it to `0` only when you explicitly need full raw tool payloads.
-- Keep `summarizeLargeToolResults = true` so very large tool payloads are summarized instead of injecting long partial JSON/log fragments into context.
-- Keep `sanitizeToolResultArtifacts = true` so transient metadata blobs (for example `cache_control` JSON tails) are removed from tool output before model ingestion.
-- Keep `autoCompact = true`.
-- Keep `retryOnContextOverflow = true`.
-- Keep `emptyResponseAutoRetry = true` so the provider automatically asks the model to continue when a turn unexpectedly ends with no text and no tool call.
-- Start with `emptyResponseAutoRetryMaxAttempts = 1` to avoid runaway loops.
-- Start with:
-  - `contextUtilization = 0.85`
-  - `hardContextUtilization = 0.72`
-  - `compactKeepLastTurns = 12`
-  - `hardCompactKeepLastTurns = 6`
-  - `maxOutputTokensCap = 131072`
-  - `requestTimeoutMs = 1200000`
-- For DeepSeek V4 Pro maximum output, use `maxOutputTokensCap = 393216`; for everyday latency/cost control, `131072` is usually plenty.
-- Use `toolResultMode = auto` unless your model already reliably supports `role=tool`.
-- Default `toolCallingMode = apiDirect` so tool execution stays in direct API flow.
-- Use `apiDirectMaxTools = 128` and `apiDirectIncludeAllTools = true` for full tool coverage.
-- In apiDirect mode, request-level `maxToolsPerRequest` cap is bypassed; tool count is governed by `apiDirectMaxTools`.
-- Even with `apiDirectIncludeAllTools = true`, tools are priority-ordered before cap/slice so core execution tools (for example `run_in_terminal`) stay available under request-level tool limits.
-- Tool suppression: when `run_in_terminal` is available, `create_and_run_task` and `run_vscode_command` are removed from the tool list. This prevents the model from opening VS Code input prompts instead of running terminal commands directly.
-- For MCP-provided tools (Ghidra, scooter tools, etc.): they are included in the apiDirect tool set alongside VS Code native tools with no special filtering — all advertised tools up to `apiDirectMaxTools` are passed to the model.
+Use classic only if you need the unmodified full tool catalog and are willing to
+pay the extra token cost.
 
-## Tool Execution Design (apiDirect mode)
+## DeepSeek Compatibility Notes
 
-When `toolCallingMode = apiDirect` (the default):
+DeepSeek V4 supports thinking mode and tool use, but it has a few important API
+rules:
 
-| Condition | Behavior |
-| --- | --- |
-| `run_in_terminal` is available | `create_and_run_task` and `run_vscode_command` are suppressed to avoid VS Code input prompts |
-| `apiDirectIncludeAllTools = true` (default) | All tools flow through, priority-ordered, capped by `apiDirectMaxTools` |
-| `apiDirectMaxTools = 128` (default) | Full VS Code + MCP tool catalog reaches the model |
-| Classic mode fallback | `maxToolsPerRequest` cap applies; no tool suppression; full schemas (not compacted) |
+- In thinking mode, `reasoning_content` is streamed separately from final
+  visible `content`.
+- When an assistant message makes tool calls, its `reasoning_content` must be
+  preserved in later request history.
+- Sampling fields such as `temperature` and `top_p` are not useful in thinking
+  mode.
+- DeepSeek does not use llama.cpp-specific `cache_prompt`.
 
-- Use `thinkingMode = deep` for maximum DeepSeek V4 Pro reasoning quality. Use `balanced` (or `auto`) when latency and cost matter more.
-- Leave `logStreamChunks = false` during normal work. Turn it on only while debugging stream parsing because it duplicates generated text into JSONL logs.
+This fork handles those details in the provider:
 
-If a response reaches max output tokens, the extension appends a hint in chat output so this is visible (instead of appearing as a silent stop).
+- It reads streamed `reasoning_content`, `reasoning`, `thinking`, and
+  `<think>...</think>` text.
+- It sends DeepSeek `thinking.type` and `reasoning_effort`.
+- It preserves `reasoning_content` on assistant tool-call messages.
+- It skips llama.cpp-only and ignored thinking-mode parameters for DeepSeek.
 
-## Troubleshooting
+## Context Management
 
-- DeepSeek models do not appear in picker:
-  - Run `Llama.cpp: Configure DeepSeek` again and paste a valid DeepSeek API key.
-  - If key validation fails with `401 Unauthorized`, rotate/re-copy the key in `Llama.cpp: Set API Key`.
-  - Use `Llama.cpp: Refresh Models` after updating the key.
-- Raw JSON/JSONL hangs in terminal:
-  - Avoid dumping entire files to terminal.
-  - Use bounded reads, for example:
-    - `head -n 80 <path-to-log.jsonl>`
-    - `rg -n "models.request|models.http.response|models.request.failed" <path-to-log.jsonl>`
-    - `tail -n 120 <path-to-log.jsonl>`
+The provider estimates prompt size before each request and can compact old
+history when the conversation approaches the model context limit.
 
-## Known Limitation: Context Usage In VS Code Chat
+Important settings:
 
-You may see current context usage shown as `0` in VS Code Chat for third-party providers, while GitHub Copilot models display usage.
+```json
+{
+  "llamacpp.contextUtilization": 0.85,
+  "llamacpp.hardContextUtilization": 0.72,
+  "llamacpp.compactKeepLastTurns": 12,
+  "llamacpp.hardCompactKeepLastTurns": 6,
+  "llamacpp.minReplyReserveTokens": 1536,
+  "llamacpp.autoCompact": true,
+  "llamacpp.retryOnContextOverflow": true
+}
+```
 
-- This extension still performs internal token estimation and context budgeting before each request.
-- The built-in usage indicator behavior for custom providers is currently limited and may not reflect real usage even when requests are processed correctly.
-- In practice, this means you can still see `0` in the UI even while long requests are being compacted and token-limited internally.
-- To compensate, this extension exposes its own live context estimate and category breakdown in the Llama.cpp status bar item and Quick Actions view.
+For DeepSeek V4, the provider uses a 1M context fallback when runtime metadata
+does not report context length and `modelFamily` is `deepseek`.
+
+VS Code's built-in context usage indicator can show `0` for third-party
+providers. This extension exposes its own estimated context usage in the status
+bar and Quick Access view.
+
+## Tool Results
+
+Large tool outputs can easily dominate the prompt. The extension protects the
+model context with these defaults:
+
+```json
+{
+  "llamacpp.maxToolResultChars": 24000,
+  "llamacpp.summarizeLargeToolResults": true,
+  "llamacpp.sanitizeToolResultArtifacts": true
+}
+```
+
+Set `maxToolResultChars = 0` only when you explicitly need raw full tool output.
+
+## Logging And Diagnostics
+
+Logging is enabled by default but stream chunk logging is disabled by default.
+
+```json
+{
+  "llamacpp.enableFileLogging": true,
+  "llamacpp.logStreamChunks": false,
+  "llamacpp.maxLoggedStreamChunkChars": 4096,
+  "llamacpp.maxLogFiles": 20,
+  "llamacpp.showPerformanceStatusBar": true,
+  "llamacpp.showContextUsageStatusBar": true
+}
+```
+
+Useful commands:
+
+- `Llama.cpp: Open Logs Folder`
+- `Llama.cpp: Open Latest Log`
+- `Llama.cpp: Copy Latest Log Path`
+- `Llama.cpp: Toggle File Logging`
+- `Llama.cpp: Toggle Stream Chunk Logging`
+- `Llama.cpp: Toggle Performance Status Bar`
+- `Llama.cpp: Toggle Context Usage Status Bar`
+
+Leave `logStreamChunks = false` during normal work. Turn it on only while
+debugging stream parsing because it duplicates generated text into JSONL logs.
+
+## Commands
+
+- `Llama.cpp: Open Sidebar`
+- `Manage Llama.cpp Provider`
+- `Llama.cpp: Configure DeepSeek`
+- `Llama.cpp: Set API Key`
+- `Llama.cpp: Open Settings`
+- `Llama.cpp: Set Thinking Mode`
+- `Llama.cpp: Set Reasoning Budget`
+- `Llama.cpp: Set Tool Result Mode`
+- `Llama.cpp: Set Tool Calling Mode`
+- `Llama.cpp: Refresh Models`
+- `Llama.cpp: Open Copilot Model Picker`
+- `Llama.cpp: Open Logs Folder`
+- `Llama.cpp: Open Latest Log`
+- `Llama.cpp: Copy Latest Log Path`
+
+## Settings Reference
+
+Core:
+
+- `llamacpp.serverUrl`
+- `llamacpp.contextLength`
+- `llamacpp.modelFamily`
+- `llamacpp.modelListCacheTtlMs`
+- `llamacpp.modelDiscoveryTimeoutMs`
+- `llamacpp.requestTimeoutMs`
+- `llamacpp.requestQueueTimeoutMs`
+
+Context and output:
+
+- `llamacpp.autoCompact`
+- `llamacpp.retryOnContextOverflow`
+- `llamacpp.contextUtilization`
+- `llamacpp.hardContextUtilization`
+- `llamacpp.compactKeepLastTurns`
+- `llamacpp.hardCompactKeepLastTurns`
+- `llamacpp.maxOutputTokensCap`
+- `llamacpp.minReplyReserveTokens`
+
+Tools:
+
+- `llamacpp.toolCallingMode`
+- `llamacpp.apiDirectMaxTools`
+- `llamacpp.apiDirectIncludeAllTools`
+- `llamacpp.maxToolsPerRequest`
+- `llamacpp.toolResultMode`
+- `llamacpp.maxToolResultChars`
+- `llamacpp.summarizeLargeToolResults`
+- `llamacpp.sanitizeToolResultArtifacts`
+
+Reasoning:
+
+- `llamacpp.thinkingMode`
+- `llamacpp.reasoningBudget`
+
+Recovery:
+
+- `llamacpp.emptyResponseAutoRetry`
+- `llamacpp.emptyResponseAutoRetryMaxAttempts`
+- `llamacpp.emptyResponseContinuationPrompt`
+- `llamacpp.toolCallOnlyAutoretry`
+- `llamacpp.toolCallOnlyAutoretryThreshold`
+
+Logging:
+
+- `llamacpp.enableFileLogging`
+- `llamacpp.logStreamChunks`
+- `llamacpp.maxLoggedStreamChunkChars`
+- `llamacpp.showPerformanceStatusBar`
+- `llamacpp.showContextUsageStatusBar`
+- `llamacpp.maxLogFiles`
 
 ## Development
 
-1. Clone the repository.
-
-```sh
-git clone https://github.com/mbeps/llama-vscode-chat.git
-cd llama-vscode-chat
-```
-
-1. Install dependencies.
+Install dependencies:
 
 ```sh
 npm install
 ```
 
-1. Compile.
+Compile:
 
 ```sh
 npm run compile
 ```
 
-1. Run tests.
+Run tests:
 
 ```sh
-npm run test
+npm test
 ```
 
-1. Package local VSIX.
+Package a local VSIX:
 
 ```sh
-npx @vscode/vsce package -o llama-vscode-chat-local.vsix
+npx @vscode/vsce package
 ```
+
+Install the local VSIX:
+
+```sh
+code --install-extension .\llama-vscode-chat-0.2.11.vsix --force
+```
+
+After installing, run `Developer: Reload Window` in VS Code.
+
+## Repository Notes
+
+This is an independent personal fork. The original upstream remote can be kept
+for reference, but development is intended to continue from this fork without
+automatically pulling upstream changes.
 
 ## References
 
-- [Llama.cpp](https://github.com/ggerganov/llama.cpp)
+- [llama.cpp](https://github.com/ggerganov/llama.cpp)
 - [VS Code Extension API](https://code.visualstudio.com/api)
+- [DeepSeek API Docs](https://api-docs.deepseek.com/)
