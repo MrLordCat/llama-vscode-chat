@@ -70,6 +70,11 @@ export interface OpenAIChatMessage {
 	 */
 	tool_calls?: OpenAIToolCall[];
 	/**
+	 * DeepSeek thinking-mode chain-of-thought payload.
+	 * Required by DeepSeek on later turns when an assistant message made tool calls.
+	 */
+	reasoning_content?: string;
+	/**
 	 * ID of the tool call this message is responding to, if applicable.
 	 */
 	tool_call_id?: string;

@@ -225,6 +225,35 @@ function bytesToBase64(bytes: Uint8Array): string {
 	return btoa(binary);
 }
 
+function collectThinkingPartText(part: unknown): string {
+	if (!part || typeof part !== "object") {
+		return "";
+	}
+	if (part instanceof vscode.LanguageModelTextPart) {
+		return "";
+	}
+
+	const obj = part as Record<string, unknown>;
+	const ctorName = (part as { constructor?: { name?: string } }).constructor?.name;
+	const isThinkingCtor = ctorName === "LanguageModelThinkingPart";
+	const candidates = [
+		obj.reasoning_content,
+		obj.reasoning,
+		obj.thinking,
+		isThinkingCtor ? obj.text : undefined,
+		isThinkingCtor ? obj.value : undefined,
+		typeof obj.text === "string" && obj.metadata !== undefined && obj.mimeType === undefined ? obj.text : undefined,
+	];
+
+	for (const candidate of candidates) {
+		if (typeof candidate === "string" && candidate.length > 0) {
+			return candidate;
+		}
+	}
+
+	return "";
+}
+
 /**
  * Convert VS Code chat request messages into OpenAI-compatible message objects.
  * @param messages The VS Code chat messages to convert.
@@ -247,6 +276,7 @@ export function convertMessages(
 	for (const m of messages) {
 		const role = mapRole(m);
 		const textParts: string[] = [];
+		const reasoningParts: string[] = [];
 		const toolCalls: OpenAIToolCall[] = [];
 		const toolResults: { callId: string; content: string; name?: string }[] = [];
 		const dataParts: vscode.LanguageModelDataPart[] = [];
@@ -270,6 +300,11 @@ export function convertMessages(
 				toolResults.push({ callId, content, name: knownToolNames.get(callId) });
 			} else if (part instanceof vscode.LanguageModelDataPart) {
 				dataParts.push(part);
+			} else {
+				const thinkingText = collectThinkingPartText(part);
+				if (thinkingText) {
+					reasoningParts.push(thinkingText);
+				}
 			}
 		}
 
@@ -312,7 +347,16 @@ export function convertMessages(
 
 		let emittedAssistantToolCall = false;
 		if (toolCalls.length > 0) {
-			raw.push({ role: "assistant", content: textParts.join("") || undefined, tool_calls: toolCalls });
+			const assistantMessage: OpenAIChatMessage = {
+				role: "assistant",
+				content: textParts.join("") || "",
+				tool_calls: toolCalls,
+			};
+			const reasoningContent = reasoningParts.join("");
+			if (reasoningContent) {
+				assistantMessage.reasoning_content = reasoningContent;
+			}
+			raw.push(assistantMessage);
 			emittedAssistantToolCall = true;
 		}
 
@@ -369,6 +413,11 @@ export function convertMessages(
 		if (msg.role === "assistant" && last.role === "assistant" && !lastHasArrayContent && !msgHasArrayContent) {
 			if (msg.content) {
 				last.content = last.content ? String(last.content) + "\n\n" + String(msg.content) : String(msg.content);
+			}
+			if (msg.reasoning_content) {
+				last.reasoning_content = last.reasoning_content
+					? `${last.reasoning_content}${msg.reasoning_content}`
+					: msg.reasoning_content;
 			}
 			if (msg.tool_calls) {
 				last.tool_calls = [...(last.tool_calls ?? []), ...msg.tool_calls];

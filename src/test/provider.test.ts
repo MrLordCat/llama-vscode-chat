@@ -127,7 +127,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
 
             assert.ok(typeof truncated[0].content === "string");
             assert.ok(truncated[0].content!.length < longToolPayload.length);
-            assert.ok(truncated[0].content!.includes("tool result truncated"));
+            assert.ok(truncated[0].content!.includes("tool result summarized"));
         });
 
         test("serializes local chat request slots", async () => {
@@ -652,9 +652,34 @@ suite("Llama.cpp Chat Provider Extension", () => {
             assert.strictEqual(out.length, 2);
             assert.strictEqual(out[0].role, "assistant");
             assert.strictEqual(out[1].role, "tool");
-            assert.strictEqual(out[1].tool_call_id, callId);
-            assert.ok((out[1].content as string).includes("ok"));
+          assert.strictEqual(out[1].tool_call_id, callId);
+          assert.ok((out[1].content as string).includes("ok"));
           });
+
+        test("preserves reasoning_content on assistant tool-call messages", () => {
+            const thinkingPart = {
+                constructor: { name: "LanguageModelThinkingPart" },
+                text: "need a file read before answering",
+            } as unknown as vscode.LanguageModelChatMessage["content"][number];
+            const callId = "call_reasoning_1";
+            const messages: vscode.LanguageModelChatMessage[] = [
+                {
+                    role: vscode.LanguageModelChatMessageRole.Assistant,
+                    content: [
+                        thinkingPart,
+                        new vscode.LanguageModelToolCallPart(callId, "read_file", { path: "README.md" }),
+                    ],
+                    name: undefined,
+                },
+            ];
+
+            const out: any[] = convertMessages(messages, { toolResultMode: "tool" });
+            assert.strictEqual(out.length, 1);
+            assert.strictEqual(out[0].role, "assistant");
+            assert.strictEqual(out[0].content, "");
+            assert.strictEqual(out[0].reasoning_content, "need a file read before answering");
+            assert.strictEqual(out[0].tool_calls[0].id, callId);
+        });
 
       test("hoists system messages to the top", () => {
           const messages: vscode.LanguageModelChatMessage[] = [
@@ -856,7 +881,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
             assert.ok(getTaskOutput?.function.description?.includes("do not become chat context automatically"));
         });
 
-        test("convertTools apiDirect include-all keeps run_vscode_command", () => {
+        test("convertTools apiDirect include-all still suppresses prompt-based command tool", () => {
             const out = convertTools(
                 {
                     toolMode: vscode.LanguageModelChatToolMode.Auto,
@@ -870,7 +895,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
             );
 
             const names = (out.tools ?? []).map(t => t.function.name);
-            assert.ok(names.includes("run_vscode_command"));
+            assert.ok(!names.includes("run_vscode_command"));
             assert.ok(names.includes("run_in_terminal"));
         });
 

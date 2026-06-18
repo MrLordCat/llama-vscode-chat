@@ -1698,6 +1698,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         const maxTokens = Math.max(1, Math.min(requestedMaxTokens, effectiveModelMaxOutput, maxOutputCap));
         const temperatureDefault = resolvedFamily === "deepseek" ? 1.0 : 0.7;
         const temperature = this.clampNumber(options.modelOptions?.temperature ?? temperatureDefault, 0, 2, temperatureDefault);
+        const isDeepSeekThinkingRequest = resolvedFamily === "deepseek" && thinkingMode !== "off";
 
         const modelInputLimit = Math.max(1, contextLength);
         const inputBudget = Math.max(1, Math.floor(modelInputLimit * contextUtil));
@@ -1792,8 +1793,11 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             messages: [],
             stream: true,
             max_tokens: maxTokens,
-            temperature,
         };
+
+        if (!isDeepSeekThinkingRequest) {
+            requestBody.temperature = temperature;
+        }
 
         if (requestModelFamily !== "deepseek") {
             requestBody.cache_prompt = cachePrompt;
@@ -1814,18 +1818,18 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             };
         }
 
-        if (typeof options.modelOptions?.top_p === "number") {
+        if (!isDeepSeekThinkingRequest && typeof options.modelOptions?.top_p === "number") {
             requestBody.top_p = this.clampNumber(options.modelOptions.top_p, 0, 1, 1);
         }
 
-        if (typeof options.modelOptions?.top_k === "number") {
+        if (!isDeepSeekThinkingRequest && typeof options.modelOptions?.top_k === "number") {
             requestBody.top_k = this.clampInt(options.modelOptions.top_k, 0, 1000, 40);
         }
 
         if (cappedToolConfig.tools) {
             requestBody.tools = cappedToolConfig.tools;
         }
-        if (cappedToolConfig.tool_choice) {
+        if (cappedToolConfig.tool_choice && requestModelFamily !== "deepseek") {
             requestBody.tool_choice = cappedToolConfig.tool_choice;
         }
 
