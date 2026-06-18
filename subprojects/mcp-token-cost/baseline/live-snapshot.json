@@ -1,0 +1,76 @@
+{
+  "generatedAt": "2026-05-29T11:48:23.617Z",
+  "source": "C:\\Users\\Chris\\Documents\\GitHub\\llama-vscode-chat\\logs.log",
+  "filter": {},
+  "summary": {
+    "parsedRecords": 138,
+    "invalidLines": 1,
+    "firstTs": "2026-05-11T13:31:07.789Z",
+    "lastTs": "2026-05-11T13:34:32.130Z",
+    "turnStarts": 3,
+    "turnCompletes": 3,
+    "turnFails": 0,
+    "inFlightTurns": 1,
+    "errorLikeRecords": 3,
+    "modelsSeen": [
+      "Qwen3.6-27B-Q3_K_S.gguf"
+    ],
+    "usedToolCount": 2
+  },
+  "topUsedTools": [
+    {
+      "name": "read_file",
+      "count": 18
+    },
+    {
+      "name": "run_in_terminal",
+      "count": 1
+    }
+  ],
+  "topEvents": [
+    {
+      "name": "chat.stream.chunk",
+      "count": 111
+    },
+    {
+      "name": "chat.messages.auto_compact",
+      "count": 3
+    },
+    {
+      "name": "chat.messages.initial",
+      "count": 3
+    },
+    {
+      "name": "chat.request.send",
+      "count": 3
+    },
+    {
+      "name": "chat.stream.end",
+      "count": 3
+    },
+    {
+      "name": "chat.turn.budget",
+      "count": 3
+    },
+    {
+      "name": "chat.turn.complete",
+      "count": 3
+    },
+    {
+      "name": "chat.turn.start",
+      "count": 3
+    },
+    {
+      "name": "chat.request.response",
+      "count": 2
+    },
+    {
+      "name": "chat.request.success",
+      "count": 2
+    },
+    {
+      "name": "chat.stream.capture_started",
+      "count": 2
+    }
+  ]
+}

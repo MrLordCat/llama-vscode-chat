@@ -1,0 +1,210 @@
+{
+  "generatedAt": "2026-05-29T10:29:17.122Z",
+  "source": "C:\\Users\\Chris\\AppData\\Roaming\\Code\\User\\globalStorage\\maruf-bepary.llama-vscode-chat\\logs\\llamacpp-2026-05-29T09-58-01-411Z-7732.jsonl",
+  "filter": {
+    "modelContains": "qwen"
+  },
+  "summary": {
+    "parsedRecords": 505,
+    "invalidLines": 0,
+    "firstTs": "2026-05-29T09:58:00.803Z",
+    "lastTs": "2026-05-29T10:28:55.220Z",
+    "turnStarts": 44,
+    "turnCompletes": 44,
+    "turnFails": 0,
+    "inFlightTurns": 0,
+    "errorLikeRecords": 43,
+    "modelsSeen": [
+      "Qwen3.6-27B-Q3_K_S.gguf"
+    ],
+    "usedToolCount": 26
+  },
+  "topUsedTools": [
+    {
+      "name": "read_file",
+      "count": 276
+    },
+    {
+      "name": "create_directory",
+      "count": 135
+    },
+    {
+      "name": "vscode_listCodeUsages",
+      "count": 110
+    },
+    {
+      "name": "run_in_terminal",
+      "count": 98
+    },
+    {
+      "name": "file_search",
+      "count": 88
+    },
+    {
+      "name": "grep_search",
+      "count": 71
+    },
+    {
+      "name": "memory",
+      "count": 70
+    },
+    {
+      "name": "list_dir",
+      "count": 61
+    },
+    {
+      "name": "session_store_sql",
+      "count": 58
+    },
+    {
+      "name": "create_file",
+      "count": 55
+    },
+    {
+      "name": "replace_string_in_file",
+      "count": 49
+    },
+    {
+      "name": "semantic_search",
+      "count": 43
+    },
+    {
+      "name": "manage_todo_list",
+      "count": 34
+    },
+    {
+      "name": "install_extension",
+      "count": 24
+    },
+    {
+      "name": "create_new_jupyter_notebook",
+      "count": 16
+    },
+    {
+      "name": "get_errors",
+      "count": 14
+    },
+    {
+      "name": "get_python_environment_details",
+      "count": 12
+    },
+    {
+      "name": "run_vscode_command",
+      "count": 11
+    },
+    {
+      "name": "get_changed_files",
+      "count": 8
+    },
+    {
+      "name": "configure_python_environment",
+      "count": 7
+    },
+    {
+      "name": "get_python_executable_details",
+      "count": 7
+    },
+    {
+      "name": "resolve_memory_file_uri",
+      "count": 7
+    },
+    {
+      "name": "create_new_workspace",
+      "count": 6
+    },
+    {
+      "name": "get_vscode_api",
+      "count": 5
+    },
+    {
+      "name": "terminal_last_command",
+      "count": 4
+    },
+    {
+      "name": "terminal_selection",
+      "count": 4
+    }
+  ],
+  "topEvents": [
+    {
+      "name": "chat.context.usage",
+      "count": 44
+    },
+    {
+      "name": "chat.messages.initial",
+      "count": 44
+    },
+    {
+      "name": "chat.queue.acquired",
+      "count": 44
+    },
+    {
+      "name": "chat.queue.released",
+      "count": 44
+    },
+    {
+      "name": "chat.request.response",
+      "count": 44
+    },
+    {
+      "name": "chat.request.send",
+      "count": 44
+    },
+    {
+      "name": "chat.request.success",
+      "count": 44
+    },
+    {
+      "name": "chat.turn.budget",
+      "count": 44
+    },
+    {
+      "name": "chat.turn.complete",
+      "count": 44
+    },
+    {
+      "name": "chat.turn.start",
+      "count": 44
+    },
+    {
+      "name": "models.runtime_context.detected",
+      "count": 27
+    },
+    {
+      "name": "chat.tool_results.truncated",
+      "count": 21
+    },
+    {
+      "name": "chat.response.empty_output_with_tool_calls",
+      "count": 7
+    },
+    {
+      "name": "chat.queue.wait",
+      "count": 4
+    },
+    {
+      "name": "models.http.response",
+      "count": 1
+    },
+    {
+      "name": "models.http.send",
+      "count": 1
+    },
+    {
+      "name": "models.refresh.requested",
+      "count": 1
+    },
+    {
+      "name": "models.request.start",
+      "count": 1
+    },
+    {
+      "name": "models.request.success",
+      "count": 1
+    },
+    {
+      "name": "session.start",
+      "count": 1
+    }
+  ]
+}

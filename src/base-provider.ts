@@ -12,8 +12,10 @@ import {
 } from "vscode";
 import { tryParseJSONObject } from "./utils";
 
-export const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
+export const DEFAULT_MAX_OUTPUT_TOKENS = 131072;
 export const DEFAULT_CONTEXT_LENGTH = 65536;
+const STREAM_TEXT_FLUSH_INTERVAL_MS = 50;
+const STREAM_TEXT_FLUSH_CHARS = 1024;
 
 /**
  * Base class for OpenAI-compatible chat providers.
@@ -281,6 +283,7 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
 
         const reader = responseBody.getReader();
         const decoder = new TextDecoder();
+        const coalescedProgress = this.createTextCoalescingProgress(progress);
         let buffer = "";
 
         try {
@@ -295,7 +298,7 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
                 buffer = lines.pop() || "";
 
                 for (const line of lines) {
-                    await this.processSseLine(line, progress);
+                    await this.processSseLine(line, coalescedProgress.progress);
                 }
             }
 
@@ -306,14 +309,16 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
                     if (!trimmedLine) {
                         continue;
                     }
-                    await this.processSseLine(trimmedLine, progress);
+                    await this.processSseLine(trimmedLine, coalescedProgress.progress);
                 }
             }
 
-            await this.flushToolCallBuffers(progress, /*throwOnInvalid*/ false);
-            await this.flushActiveTextToolCall(progress);
-            this.flushThinkingBuffers(progress);
+            await this.flushToolCallBuffers(coalescedProgress.progress, /*throwOnInvalid*/ false);
+            await this.flushActiveTextToolCall(coalescedProgress.progress);
+            this.flushThinkingBuffers(coalescedProgress.progress);
+            coalescedProgress.flush();
         } finally {
+            coalescedProgress.flush();
             reader.releaseLock();
             // Clean up any leftover tool call state
             this._toolCallBuffers.clear();
@@ -328,6 +333,60 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
             this._insideThinkingTag = false;
             this._thinkingFallbackHeaderEmitted = false;
         }
+    }
+
+    private createTextCoalescingProgress(
+        progress: vscode.Progress<vscode.LanguageModelResponsePart>
+    ): { progress: vscode.Progress<vscode.LanguageModelResponsePart>; flush: () => void } {
+        let bufferedText = "";
+        let flushTimer: ReturnType<typeof setTimeout> | undefined;
+
+        const clearFlushTimer = (): void => {
+            if (flushTimer) {
+                clearTimeout(flushTimer);
+                flushTimer = undefined;
+            }
+        };
+
+        const flush = (): void => {
+            clearFlushTimer();
+            if (!bufferedText) {
+                return;
+            }
+            const text = bufferedText;
+            bufferedText = "";
+            progress.report(new vscode.LanguageModelTextPart(text));
+        };
+
+        const scheduleFlush = (): void => {
+            if (flushTimer) {
+                return;
+            }
+            flushTimer = setTimeout(flush, STREAM_TEXT_FLUSH_INTERVAL_MS);
+        };
+
+        return {
+            progress: {
+                report: part => {
+                    if (part instanceof vscode.LanguageModelTextPart) {
+                        if (!part.value) {
+                            return;
+                        }
+                        bufferedText += part.value;
+                        if (bufferedText.length >= STREAM_TEXT_FLUSH_CHARS) {
+                            flush();
+                        } else {
+                            scheduleFlush();
+                        }
+                        return;
+                    }
+
+                    flush();
+                    progress.report(part);
+                },
+            },
+            flush,
+        };
     }
 
     private async processSseLine(

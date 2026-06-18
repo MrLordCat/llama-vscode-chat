@@ -10,9 +10,14 @@ import { LlamaLogService } from "./logger";
 
 const EXTENSION_ID = "maruf-bepary.llama-vscode-chat";
 const DEFAULT_SERVER_URL = "http://localhost:8000";
+const DEEPSEEK_SERVER_URL = "https://api.deepseek.com";
+const DEEPSEEK_DISCOVERY_TIMEOUT_MS = 20000;
+const DEEPSEEK_CONTEXT_LENGTH = 1048576;
+const DEEPSEEK_MAX_OUTPUT_TOKENS = 393216;
 
 type ThinkingMode = "off" | "light" | "balanced" | "deep" | "auto";
 type ToolResultMode = "auto" | "tool" | "user";
+type ToolCallingMode = "classic" | "apiDirect";
 
 type ContextUsageDisplay = {
 	summary: string;
@@ -101,6 +106,7 @@ class LlamaQuickActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 		const thinkingMode = String(config.get("thinkingMode", "auto"));
 		const reasoningBudget = Number(config.get("reasoningBudget", 2048));
 		const toolResultMode = String(config.get("toolResultMode", "auto"));
+		const toolCallingMode = String(config.get("toolCallingMode", "classic"));
 		const fileLoggingEnabled = config.get<boolean>("enableFileLogging", true) !== false;
 		const streamChunkLoggingEnabled = config.get<boolean>("logStreamChunks", false) === true;
 		const performanceStatusBarEnabled = config.get<boolean>("showPerformanceStatusBar", true) !== false;
@@ -125,6 +131,14 @@ class LlamaQuickActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 				title: "Manage Llama.cpp Provider",
 				command: "llamacpp.manage",
 			}),
+			new QuickActionItem("Configure DeepSeek", undefined, {
+				title: "Configure DeepSeek",
+				command: "llamacpp.configureDeepSeek",
+			}),
+			new QuickActionItem("Manage API Key", undefined, {
+				title: "Manage API Key",
+				command: "llamacpp.setApiKey",
+			}),
 			new QuickActionItem("Server URL", serverUrl, {
 				title: "Manage Llama.cpp Provider",
 				command: "llamacpp.manage",
@@ -144,6 +158,10 @@ class LlamaQuickActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 			new QuickActionItem("Tool Result Mode", toolResultMode, {
 				title: "Set Tool Result Mode",
 				command: "llamacpp.setToolResultMode",
+			}),
+			new QuickActionItem("Tool Calling Mode", toolCallingMode, {
+				title: "Set Tool Calling Mode",
+				command: "llamacpp.setToolCallingMode",
 			}),
 			new QuickActionItem("Open Logs Folder", undefined, {
 				title: "Llama.cpp: Open Logs Folder",
@@ -253,6 +271,36 @@ async function pickToolResultMode(current: ToolResultMode): Promise<ToolResultMo
 		})),
 		{
 			title: "Llama.cpp Tool Result Mode",
+			ignoreFocusOut: true,
+		}
+	);
+
+	return picked?.value;
+}
+
+async function pickToolCallingMode(current: ToolCallingMode): Promise<ToolCallingMode | undefined> {
+	const options: Array<{ label: string; description: string; value: ToolCallingMode }> = [
+		{
+			label: "Classic",
+			description: "Send the full tool catalog (existing behavior)",
+			value: "classic",
+		},
+		{
+			label: "API Direct",
+			description: "Send compact prioritized tool definitions to reduce token overhead",
+			value: "apiDirect",
+		},
+	];
+
+	const picked = await vscode.window.showQuickPick(
+		options.map(option => ({
+			label: option.label,
+			description: option.description,
+			detail: option.value === current ? "Current" : undefined,
+			value: option.value,
+		})),
+		{
+			title: "Llama.cpp Tool Calling Mode",
 			ignoreFocusOut: true,
 		}
 	);
@@ -434,6 +482,104 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.setApiKey", async () => {
+			const existingApiKey = await context.secrets.get("llamacpp.apiKey");
+			const apiKey = await vscode.window.showInputBox({
+				title: "Llama.cpp / OpenAI-Compatible API Key",
+				prompt: "Enter API key (leave empty to clear)",
+				password: true,
+				ignoreFocusOut: true,
+				value: existingApiKey ?? "",
+			});
+
+			if (apiKey === undefined) {
+				return;
+			}
+
+			if (apiKey.trim().length > 0) {
+				await context.secrets.store("llamacpp.apiKey", apiKey.trim());
+				vscode.window.showInformationMessage("Llama.cpp API key saved to Secret Storage.");
+			} else {
+				await context.secrets.delete("llamacpp.apiKey");
+				vscode.window.showInformationMessage("Llama.cpp API key cleared.");
+			}
+
+			llamaProvider.refreshLanguageModelChatInformation();
+			quickActionsProvider.refresh();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.configureDeepSeek", async () => {
+			const config = vscode.workspace.getConfiguration("llamacpp");
+			const apiKey = await vscode.window.showInputBox({
+				title: "DeepSeek API Key",
+				prompt: "Enter DeepSeek API key (saved in VS Code Secret Storage)",
+				password: true,
+				ignoreFocusOut: true,
+				placeHolder: "sk-...",
+			});
+
+			if (apiKey === undefined) {
+				return;
+			}
+
+			await config.update("serverUrl", DEEPSEEK_SERVER_URL, vscode.ConfigurationTarget.Global);
+			await config.update("modelFamily", "deepseek", vscode.ConfigurationTarget.Global);
+			await config.update("contextLength", DEEPSEEK_CONTEXT_LENGTH, vscode.ConfigurationTarget.Global);
+			await config.update("maxOutputTokensCap", DEEPSEEK_MAX_OUTPUT_TOKENS, vscode.ConfigurationTarget.Global);
+			await config.update("thinkingMode", "deep", vscode.ConfigurationTarget.Global);
+			await config.update("toolCallingMode", "apiDirect", vscode.ConfigurationTarget.Global);
+			await config.update("apiDirectMaxTools", 128, vscode.ConfigurationTarget.Global);
+			await config.update("apiDirectIncludeAllTools", true, vscode.ConfigurationTarget.Global);
+			await config.update("toolResultMode", "auto", vscode.ConfigurationTarget.Global);
+			await config.update("autoCompact", true, vscode.ConfigurationTarget.Global);
+			await config.update("retryOnContextOverflow", true, vscode.ConfigurationTarget.Global);
+			await config.update("modelDiscoveryTimeoutMs", DEEPSEEK_DISCOVERY_TIMEOUT_MS, vscode.ConfigurationTarget.Global);
+			await config.update("requestTimeoutMs", 1200000, vscode.ConfigurationTarget.Global);
+			await config.update("requestQueueTimeoutMs", 1200000, vscode.ConfigurationTarget.Global);
+
+			if (apiKey.trim().length > 0) {
+				await context.secrets.store("llamacpp.apiKey", apiKey.trim());
+
+				try {
+					const controller = new AbortController();
+					const timeoutHandle = setTimeout(() => controller.abort(), DEEPSEEK_DISCOVERY_TIMEOUT_MS);
+					let response: Response;
+					try {
+						response = await fetch(`${DEEPSEEK_SERVER_URL}/models`, {
+							method: "GET",
+							headers: {
+								"User-Agent": ua,
+								"Accept": "application/json",
+								"Authorization": `Bearer ${apiKey.trim()}`,
+							},
+							signal: controller.signal,
+						});
+					} finally {
+						clearTimeout(timeoutHandle);
+					}
+
+					if (!response.ok) {
+						const details = (await response.text()).trim().slice(0, 200);
+						const suffix = details.length > 0 ? `: ${details}` : "";
+						vscode.window.showErrorMessage(
+							`DeepSeek key check failed (${response.status} ${response.statusText})${suffix}`
+						);
+					}
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					vscode.window.showWarningMessage(`DeepSeek key saved, but model check failed: ${message}`);
+				}
+			}
+
+			llamaProvider.refreshLanguageModelChatInformation();
+			quickActionsProvider.refresh();
+			vscode.window.showInformationMessage("DeepSeek configured for max V4 Pro profile. Open model picker and select deepseek-v4-pro.");
+		})
+	);
+
+	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.openSettings", async () => {
 			await vscode.commands.executeCommand("workbench.action.openSettings", `@ext:${EXTENSION_ID} llamacpp`);
 		})
@@ -499,6 +645,21 @@ export function activate(context: vscode.ExtensionContext) {
 			await config.update("toolResultMode", next, vscode.ConfigurationTarget.Global);
 			quickActionsProvider.refresh();
 			vscode.window.showInformationMessage(`Llama.cpp tool result mode: ${next}`);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.setToolCallingMode", async () => {
+			const config = vscode.workspace.getConfiguration("llamacpp");
+			const current = (String(config.get("toolCallingMode", "classic")) as ToolCallingMode) ?? "classic";
+			const next = await pickToolCallingMode(current);
+			if (!next) {
+				return;
+			}
+
+			await config.update("toolCallingMode", next, vscode.ConfigurationTarget.Global);
+			quickActionsProvider.refresh();
+			vscode.window.showInformationMessage(`Llama.cpp tool calling mode: ${next}`);
 		})
 	);
 

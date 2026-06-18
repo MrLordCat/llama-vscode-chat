@@ -1,0 +1,234 @@
+{
+  "generatedAt": "2026-05-29T08:28:46.223Z",
+  "source": "C:\\Users\\Chris\\AppData\\Roaming\\Code\\User\\globalStorage\\maruf-bepary.llama-vscode-chat\\logs\\llamacpp-2026-05-29T07-52-07-565Z-26800.jsonl",
+  "filter": {
+    "modelContains": "qwen"
+  },
+  "summary": {
+    "parsedRecords": 588,
+    "invalidLines": 0,
+    "firstTs": "2026-05-29T07:52:07.332Z",
+    "lastTs": "2026-05-29T08:25:58.374Z",
+    "turnStarts": 50,
+    "turnCompletes": 50,
+    "turnFails": 0,
+    "inFlightTurns": 0,
+    "errorLikeRecords": 50,
+    "modelsSeen": [
+      "Qwen3.6-27B-Q3_K_S.gguf"
+    ],
+    "usedToolCount": 33
+  },
+  "topUsedTools": [
+    {
+      "name": "read_file",
+      "count": 553
+    },
+    {
+      "name": "run_in_terminal",
+      "count": 219
+    },
+    {
+      "name": "list_dir",
+      "count": 200
+    },
+    {
+      "name": "vscode_listCodeUsages",
+      "count": 164
+    },
+    {
+      "name": "grep_search",
+      "count": 122
+    },
+    {
+      "name": "manage_todo_list",
+      "count": 78
+    },
+    {
+      "name": "semantic_search",
+      "count": 50
+    },
+    {
+      "name": "replace_string_in_file",
+      "count": 45
+    },
+    {
+      "name": "install_extension",
+      "count": 36
+    },
+    {
+      "name": "memory",
+      "count": 34
+    },
+    {
+      "name": "get_errors",
+      "count": 32
+    },
+    {
+      "name": "file_search",
+      "count": 31
+    },
+    {
+      "name": "click_element",
+      "count": 26
+    },
+    {
+      "name": "get_changed_files",
+      "count": 24
+    },
+    {
+      "name": "github_repo",
+      "count": 20
+    },
+    {
+      "name": "resolve_memory_file_uri",
+      "count": 20
+    },
+    {
+      "name": "session_store_sql",
+      "count": 20
+    },
+    {
+      "name": "get_vscode_api",
+      "count": 18
+    },
+    {
+      "name": "create_and_run_task",
+      "count": 17
+    },
+    {
+      "name": "fetch_webpage",
+      "count": 17
+    },
+    {
+      "name": "terminal_last_command",
+      "count": 17
+    },
+    {
+      "name": "testFailure",
+      "count": 17
+    },
+    {
+      "name": "hover_element",
+      "count": 16
+    },
+    {
+      "name": "navigate_page",
+      "count": 16
+    },
+    {
+      "name": "open_browser_page",
+      "count": 15
+    },
+    {
+      "name": "read_page",
+      "count": 14
+    },
+    {
+      "name": "screenshot_page",
+      "count": 14
+    },
+    {
+      "name": "get_terminal_output",
+      "count": 12
+    },
+    {
+      "name": "vscode_askQuestions",
+      "count": 12
+    },
+    {
+      "name": "copilot_getNotebookSummary",
+      "count": 11
+    }
+  ],
+  "topEvents": [
+    {
+      "name": "chat.context.usage",
+      "count": 50
+    },
+    {
+      "name": "chat.messages.initial",
+      "count": 50
+    },
+    {
+      "name": "chat.queue.acquired",
+      "count": 50
+    },
+    {
+      "name": "chat.queue.released",
+      "count": 50
+    },
+    {
+      "name": "chat.request.send",
+      "count": 50
+    },
+    {
+      "name": "chat.turn.budget",
+      "count": 50
+    },
+    {
+      "name": "chat.turn.start",
+      "count": 50
+    },
+    {
+      "name": "chat.request.response",
+      "count": 49
+    },
+    {
+      "name": "chat.request.success",
+      "count": 49
+    },
+    {
+      "name": "chat.turn.complete",
+      "count": 49
+    },
+    {
+      "name": "chat.tool_results.truncated",
+      "count": 39
+    },
+    {
+      "name": "models.runtime_context.detected",
+      "count": 34
+    },
+    {
+      "name": "chat.response.empty_output_with_tool_calls",
+      "count": 8
+    },
+    {
+      "name": "chat.queue.wait",
+      "count": 2
+    },
+    {
+      "name": "chat.request.transport_error",
+      "count": 1
+    },
+    {
+      "name": "chat.turn.failed",
+      "count": 1
+    },
+    {
+      "name": "models.http.response",
+      "count": 1
+    },
+    {
+      "name": "models.http.send",
+      "count": 1
+    },
+    {
+      "name": "models.refresh.requested",
+      "count": 1
+    },
+    {
+      "name": "models.request.start",
+      "count": 1
+    },
+    {
+      "name": "models.request.success",
+      "count": 1
+    },
+    {
+      "name": "session.start",
+      "count": 1
+    }
+  ]
+}

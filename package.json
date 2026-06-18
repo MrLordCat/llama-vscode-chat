@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/mbeps/llama-vscode-chat"
 	},
-	"version": "0.1.23",
+	"version": "0.2.10",
 	"engines": {
 		"vscode": "^1.104.0"
 	},
@@ -68,8 +68,8 @@
 					"type": "number",
 					"default": 65536,
 					"minimum": 4096,
-					"maximum": 262144,
-					"description": "Optional runtime context override for llama.cpp, for example --ctx-size 65536. When not explicitly set, the provider tries to infer context length from /v1/models metadata."
+					"maximum": 1048576,
+					"description": "Optional runtime context override, for example --ctx-size 65536. When not explicitly set, the provider infers context from runtime metadata (for example /slots on llama.cpp or /models metadata on DeepSeek)."
 				},
 				"llamacpp.modelFamily": {
 					"type": "string",
@@ -81,7 +81,14 @@
 					"default": 30000,
 					"minimum": 0,
 					"maximum": 600000,
-					"description": "How long to cache /v1/models results in milliseconds. Set to 0 to disable model list caching."
+					"description": "How long to cache model discovery results in milliseconds. Set to 0 to disable model list caching."
+				},
+				"llamacpp.modelDiscoveryTimeoutMs": {
+					"type": "number",
+					"default": 20000,
+					"minimum": 3000,
+					"maximum": 120000,
+					"description": "Timeout for model discovery calls (/v1/models or /models, plus runtime context probing) in milliseconds. Lower this if model loading appears to hang on remote endpoints."
 				},
 				"llamacpp.autoCompact": {
 					"type": "boolean",
@@ -104,6 +111,18 @@
 					"minimum": 0,
 					"maximum": 3,
 					"description": "Maximum automatic continuation retries for empty model responses per turn."
+				},
+				"llamacpp.toolCallOnlyAutoretry": {
+					"type": "boolean",
+					"default": true,
+					"description": "Automatically inject a task-summary nudge when the model makes tool calls without any text for several consecutive turns."
+				},
+				"llamacpp.toolCallOnlyAutoretryThreshold": {
+					"type": "number",
+					"default": 3,
+					"minimum": 2,
+					"maximum": 10,
+					"description": "Number of consecutive tool-call-only turns before triggering an automatic task-summary nudge."
 				},
 				"llamacpp.emptyResponseContinuationPrompt": {
 					"type": "string",
@@ -140,10 +159,10 @@
 				},
 				"llamacpp.maxOutputTokensCap": {
 					"type": "number",
-					"default": 8192,
+					"default": 131072,
 					"minimum": 128,
-					"maximum": 32768,
-					"description": "Hard cap for max_tokens sent to server to prevent excessive output budgets."
+					"maximum": 393216,
+					"description": "Hard cap for max_tokens sent to server. Set to 393216 for maximum DeepSeek V4 output."
 				},
 				"llamacpp.minReplyReserveTokens": {
 					"type": "number",
@@ -157,7 +176,7 @@
 					"default": 128,
 					"minimum": 0,
 					"maximum": 128,
-					"description": "Maximum number of tools allowed in a single request."
+					"description": "Maximum number of tools allowed in a single request for classic mode. In apiDirect mode, request-level cap is bypassed and apiDirectMaxTools is used."
 				},
 				"llamacpp.requestTimeoutMs": {
 					"type": "number",
@@ -184,6 +203,37 @@
 					"minimum": 0,
 					"maximum": 1000000,
 					"description": "Maximum characters per tool result sent to the model. Large tool outputs are truncated before they can overwhelm local context. Set to 0 to disable truncation."
+				},
+				"llamacpp.summarizeLargeToolResults": {
+					"type": "boolean",
+					"default": true,
+					"description": "When enabled, oversized tool results are replaced with a compact summary + preview instead of raw truncated payload. Helps reduce JSON/log bleed-through in model context."
+				},
+				"llamacpp.sanitizeToolResultArtifacts": {
+					"type": "boolean",
+					"default": true,
+					"description": "Strip known transient transport artifacts from tool output text (for example cache_control metadata blobs) before sending to the model."
+				},
+				"llamacpp.toolCallingMode": {
+					"type": "string",
+					"enum": [
+						"classic",
+						"apiDirect"
+					],
+					"default": "apiDirect",
+					"description": "Tool transport strategy: classic sends full tool schemas, apiDirect sends a compact prioritized subset to reduce token cost."
+				},
+				"llamacpp.apiDirectMaxTools": {
+					"type": "number",
+					"default": 128,
+					"minimum": 1,
+					"maximum": 128,
+					"description": "Maximum number of prioritized tools included when toolCallingMode=apiDirect."
+				},
+				"llamacpp.apiDirectIncludeAllTools": {
+					"type": "boolean",
+					"default": true,
+					"description": "When toolCallingMode=apiDirect, include all advertised tools (up to apiDirectMaxTools) instead of prioritized subset."
 				},
 				"llamacpp.thinkingMode": {
 					"type": "string",
@@ -260,6 +310,14 @@
 				"title": "Manage Llama.cpp Provider"
 			},
 			{
+				"command": "llamacpp.configureDeepSeek",
+				"title": "Llama.cpp: Configure DeepSeek"
+			},
+			{
+				"command": "llamacpp.setApiKey",
+				"title": "Llama.cpp: Set API Key"
+			},
+			{
 				"command": "llamacpp.openSettings",
 				"title": "Llama.cpp: Open Settings"
 			},
@@ -274,6 +332,10 @@
 			{
 				"command": "llamacpp.setToolResultMode",
 				"title": "Llama.cpp: Set Tool Result Mode"
+			},
+			{
+				"command": "llamacpp.setToolCallingMode",
+				"title": "Llama.cpp: Set Tool Calling Mode"
 			},
 			{
 				"command": "llamacpp.refreshModels",

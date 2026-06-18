@@ -10,12 +10,15 @@ A separate window isolates benchmark chat history and keeps logs cleaner.
 
 1. Open a new VS Code window at:
 
-   - `subprojects/mcp-token-cost/benchmark-workspace`
+  - `subprojects/mcp-token-cost/benchmark-workspace2`
 
 2. Ensure extension settings:
 
    - `llamacpp.enableFileLogging = true`
    - `llamacpp.logStreamChunks = false`
+  - `llamacpp.toolCallingMode = apiDirect`
+  - `llamacpp.apiDirectIncludeAllTools = true`
+  - `llamacpp.apiDirectMaxTools = 128`
 
 3. In Chat model picker, select Qwen 3.6.
 
@@ -39,8 +42,8 @@ Use this command at any time to inspect progress and tool coverage so far:
 node subprojects/mcp-token-cost/live-log-snapshot.mjs \
   --input "<COPIED_JSONL_PATH>" \
   --model-contains "qwen" \
-  --output-json subprojects/mcp-token-cost/baseline/qwen36-live-snapshot.json \
-  --output-md subprojects/mcp-token-cost/baseline/qwen36-live-snapshot.md
+  --output-json subprojects/mcp-token-cost/baseline/qwen36-live-snapshot-after.json \
+  --output-md subprojects/mcp-token-cost/baseline/qwen36-live-snapshot-after.md
 ```
 
 This reports:
@@ -61,16 +64,16 @@ LOG="<COPIED_JSONL_PATH>" && \
 node subprojects/mcp-token-cost/live-log-snapshot.mjs \
   --input "$LOG" \
   --model-contains "qwen" \
-  --output-json subprojects/mcp-token-cost/baseline/qwen36-live-snapshot.json \
-  --output-md subprojects/mcp-token-cost/baseline/qwen36-live-snapshot.md && \
+  --output-json subprojects/mcp-token-cost/baseline/qwen36-live-snapshot-after.json \
+  --output-md subprojects/mcp-token-cost/baseline/qwen36-live-snapshot-after.md && \
 node subprojects/mcp-token-cost/token-baseline.mjs \
   --input "$LOG" \
   --model-contains "qwen" \
-  --output subprojects/mcp-token-cost/baseline/qwen36-before-api-direct.json && \
+  --output subprojects/mcp-token-cost/baseline/qwen36-after-api-direct.json && \
 node subprojects/mcp-token-cost/tool-inventory.mjs \
   --input "$LOG" \
-  --output-json subprojects/mcp-token-cost/baseline/qwen36-tool-inventory-before.json \
-  --output-md subprojects/mcp-token-cost/baseline/qwen36-tool-inventory-before.md
+  --output-json subprojects/mcp-token-cost/baseline/qwen36-tool-inventory-after.json \
+  --output-md subprojects/mcp-token-cost/baseline/qwen36-tool-inventory-after.md
 ```
 
 4. Paste copied path and run baseline extraction from repository root:
@@ -79,7 +82,7 @@ node subprojects/mcp-token-cost/tool-inventory.mjs \
 node subprojects/mcp-token-cost/token-baseline.mjs \
   --input "<COPIED_JSONL_PATH>" \
   --model-contains "qwen" \
-  --output subprojects/mcp-token-cost/baseline/qwen36-before-api-direct.json
+  --output subprojects/mcp-token-cost/baseline/qwen36-after-api-direct.json
 ```
 
 5. Capture tool inventory:
@@ -87,14 +90,14 @@ node subprojects/mcp-token-cost/token-baseline.mjs \
 ```bash
 node subprojects/mcp-token-cost/tool-inventory.mjs \
   --input "<COPIED_JSONL_PATH>" \
-  --output-json subprojects/mcp-token-cost/baseline/qwen36-tool-inventory-before.json \
-  --output-md subprojects/mcp-token-cost/baseline/qwen36-tool-inventory-before.md
+  --output-json subprojects/mcp-token-cost/baseline/qwen36-tool-inventory-after.json \
+  --output-md subprojects/mcp-token-cost/baseline/qwen36-tool-inventory-after.md
 ```
 
 6. Count distinct used tools for this run (coverage gate):
 
 ```bash
-node -e "const fs=require('fs');const p='subprojects/mcp-token-cost/baseline/qwen36-tool-inventory-before.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));const rows=Array.isArray(j.tools)?j.tools:[];const used=rows.filter(t=>(t.referencedInRequestMessages||0)>0||(t.observedInStreamToolCalls||0)>0);console.log('used_tools='+used.length);"
+node -e "const fs=require('fs');const p='subprojects/mcp-token-cost/baseline/qwen36-tool-inventory-after.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));const rows=Array.isArray(j.tools)?j.tools:[];const used=rows.filter(t=>(t.referencedInRequestMessages||0)>0||(t.observedInStreamToolCalls||0)>0);console.log('used_tools='+used.length);"
 ```
 
 Target for long-run benchmark mode: `used_tools >= 20`.

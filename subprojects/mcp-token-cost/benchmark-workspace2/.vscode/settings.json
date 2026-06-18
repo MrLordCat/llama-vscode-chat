@@ -1,0 +1,9 @@
+{
+  "llamacpp.toolCallingMode": "apiDirect",
+  "llamacpp.apiDirectIncludeAllTools": true,
+  "llamacpp.apiDirectMaxTools": 128,
+  "llamacpp.toolResultMode": "auto",
+  "llamacpp.enableFileLogging": true,
+  "llamacpp.logStreamChunks": false,
+  "python-envs.defaultEnvManager": "ms-python.python:system"
+}

@@ -1,0 +1,397 @@
+{
+  "summary": {
+    "generatedAt": "2026-05-29T10:09:20.530Z",
+    "source": "C:\\Users\\Chris\\AppData\\Roaming\\Code\\User\\globalStorage\\maruf-bepary.llama-vscode-chat\\logs\\llamacpp-2026-05-29T09-58-01-411Z-7732.jsonl",
+    "parsedRecords": 214,
+    "uniqueTools": 55,
+    "toolsAdvertised": 55,
+    "toolsObservedInStream": 0
+  },
+  "tools": [
+    {
+      "name": "read_file",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 171,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 190
+    },
+    {
+      "name": "vscode_listCodeUsages",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 110,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 129
+    },
+    {
+      "name": "file_search",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 88,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 107
+    },
+    {
+      "name": "list_dir",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 60,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 79
+    },
+    {
+      "name": "grep_search",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 42,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 61
+    },
+    {
+      "name": "run_in_terminal",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 28,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 47
+    },
+    {
+      "name": "semantic_search",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 26,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 45
+    },
+    {
+      "name": "get_errors",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 14,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 33
+    },
+    {
+      "name": "memory",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 8,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 27
+    },
+    {
+      "name": "get_vscode_api",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 5,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 24
+    },
+    {
+      "name": "get_changed_files",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 4,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 23
+    },
+    {
+      "name": "click_element",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "configure_python_environment",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "copilot_getNotebookSummary",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "create_and_run_task",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "create_directory",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "create_file",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "create_new_jupyter_notebook",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "create_new_workspace",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "drag_element",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "edit_notebook_file",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "fetch_webpage",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "get_python_environment_details",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "get_python_executable_details",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "get_task_output",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "get_terminal_output",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "github_repo",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "github_text_search",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "handle_dialog",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "hover_element",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "insert_edit_into_file",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "install_extension",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "install_python_packages",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "kill_terminal",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "manage_todo_list",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "navigate_page",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "open_browser_page",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "read_notebook_cell_output",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "read_page",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "replace_string_in_file",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "resolve_memory_file_uri",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "run_notebook_cell",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "run_playwright_code",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "run_vscode_command",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "screenshot_page",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "send_to_terminal",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "session_store_sql",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "terminal_last_command",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "terminal_selection",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "testFailure",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "type_in_page",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "view_image",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "vscode_askQuestions",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "vscode_renameSymbol",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    },
+    {
+      "name": "vscode_searchExtensions_internal",
+      "advertisedInRequestBodyTools": 19,
+      "referencedInRequestMessages": 0,
+      "observedInStreamToolCalls": 0,
+      "totalSignals": 19
+    }
+  ]
+}

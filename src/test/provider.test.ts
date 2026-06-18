@@ -237,6 +237,45 @@ suite("Llama.cpp Chat Provider Extension", () => {
             assert.ok(hasThinkingPart || hasNonTextPart || text.includes("step 1 -> step 2"));
         });
 
+        test("coalesces many small text deltas before reporting progress", async () => {
+            const providerAny = provider as unknown as {
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<void>;
+            };
+
+            const encoder = new TextEncoder();
+            const chunks = Array.from(
+                { length: 100 },
+                () => "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n"
+            ).join("");
+            const stream = new ReadableStream<Uint8Array>({
+                start(controller) {
+                    controller.enqueue(encoder.encode(`${chunks}data: [DONE]\n\n`));
+                    controller.close();
+                },
+            });
+
+            const parts: vscode.LanguageModelResponsePart[] = [];
+            await providerAny.processStreamingResponse(
+                stream,
+                {
+                    report: part => parts.push(part),
+                },
+                new vscode.CancellationTokenSource().token
+            );
+
+            const textParts = parts.filter(
+                (part): part is vscode.LanguageModelTextPart => part instanceof vscode.LanguageModelTextPart
+            );
+            const text = textParts.map(part => part.value).join("");
+
+            assert.strictEqual(text, "x".repeat(100));
+            assert.ok(textParts.length < 10, `expected coalesced text parts, got ${textParts.length}`);
+        });
+
         test("flushes buffered tool calls when stream ends without DONE", async () => {
             const providerAny = provider as unknown as {
                 processStreamingResponse: (
@@ -725,6 +764,155 @@ suite("Llama.cpp Chat Provider Extension", () => {
             const names = (out.tools ?? []).map(t => t.function.name);
             assert.deepEqual(names, ["run_vscode_command"]);
             assert.deepEqual(out.tool_choice, { type: "function", function: { name: "run_vscode_command" } });
+        });
+
+        test("convertTools apiDirect caps and prioritizes tool list", () => {
+            const out = convertTools(
+                {
+                    toolMode: vscode.LanguageModelChatToolMode.Auto,
+                    tools: [
+                        { name: "random_tool", description: "Random", inputSchema: { type: "object", properties: {} } },
+                        { name: "run_in_terminal", description: "Terminal", inputSchema: { type: "object", properties: {} } },
+                        { name: "read_file", description: "Read", inputSchema: { type: "object", properties: {} } },
+                        { name: "grep_search", description: "Search", inputSchema: { type: "object", properties: {} } },
+                    ],
+                } satisfies vscode.ProvideLanguageModelChatResponseOptions,
+                { mode: "apiDirect", apiDirectMaxTools: 2 }
+            );
+
+            const names = (out.tools ?? []).map(t => t.function.name);
+            assert.deepEqual(names, ["run_in_terminal", "read_file"]);
+        });
+
+        test("convertTools apiDirect compacts schema metadata", () => {
+            const out = convertTools(
+                {
+                    toolMode: vscode.LanguageModelChatToolMode.Auto,
+                    tools: [
+                        {
+                            name: "read_file",
+                            description: "Read file content. Includes extra verbose explanation for tool usage guidance.",
+                            inputSchema: {
+                                type: "object",
+                                properties: {
+                                    path: {
+                                        type: "string",
+                                        description: "Absolute file path",
+                                        default: "README.md",
+                                    },
+                                },
+                                required: ["path"],
+                            },
+                        },
+                    ],
+                } satisfies vscode.ProvideLanguageModelChatResponseOptions,
+                { mode: "apiDirect", apiDirectMaxTools: 8 }
+            );
+
+            const tool = out.tools?.[0];
+            assert.ok(tool);
+            const params = tool?.function.parameters as Record<string, unknown>;
+            const props = (params.properties as Record<string, unknown>) ?? {};
+            const pathSchema = (props.path as Record<string, unknown>) ?? {};
+            assert.ok(typeof tool?.function.description === "string");
+            assert.ok((tool?.function.description ?? "").length <= 200);
+            assert.equal(pathSchema.description, undefined);
+            assert.equal(pathSchema.default, undefined);
+        });
+
+        test("convertTools apiDirect prioritizes workspace task tools", () => {
+            const out = convertTools(
+                {
+                    toolMode: vscode.LanguageModelChatToolMode.Auto,
+                    tools: [
+                        { name: "random_tool", description: "Random", inputSchema: { type: "object", properties: {} } },
+                        { name: "run_task", description: "Run workspace task", inputSchema: { type: "object", properties: {} } },
+                        { name: "get_task_output", description: "Read task output", inputSchema: { type: "object", properties: {} } },
+                        { name: "grep_search", description: "Search", inputSchema: { type: "object", properties: {} } },
+                    ],
+                } satisfies vscode.ProvideLanguageModelChatResponseOptions,
+                { mode: "apiDirect", apiDirectMaxTools: 2 }
+            );
+
+            const names = (out.tools ?? []).map(t => t.function.name);
+            assert.deepEqual(names, ["run_task", "grep_search"]);
+        });
+
+        test("convertTools apiDirect adds task output guidance", () => {
+            const out = convertTools(
+                {
+                    toolMode: vscode.LanguageModelChatToolMode.Auto,
+                    tools: [
+                        { name: "run_task", description: "Run workspace task", inputSchema: { type: "object", properties: {} } },
+                        { name: "get_task_output", description: "Read task output", inputSchema: { type: "object", properties: {} } },
+                    ],
+                } satisfies vscode.ProvideLanguageModelChatResponseOptions,
+                { mode: "apiDirect", apiDirectMaxTools: 8 }
+            );
+
+            const runTask = out.tools?.find(t => t.function.name === "run_task");
+            const getTaskOutput = out.tools?.find(t => t.function.name === "get_task_output");
+            assert.ok(runTask?.function.description?.includes("existing workspace tasks"));
+            assert.ok(getTaskOutput?.function.description?.includes("do not become chat context automatically"));
+        });
+
+        test("convertTools apiDirect include-all keeps run_vscode_command", () => {
+            const out = convertTools(
+                {
+                    toolMode: vscode.LanguageModelChatToolMode.Auto,
+                    tools: [
+                        { name: "run_vscode_command", description: "Run VS Code command", inputSchema: { type: "object", properties: {} } },
+                        { name: "run_in_terminal", description: "Run terminal command", inputSchema: { type: "object", properties: {} } },
+                        { name: "read_file", description: "Read file", inputSchema: { type: "object", properties: {} } },
+                    ],
+                } satisfies vscode.ProvideLanguageModelChatResponseOptions,
+                { mode: "apiDirect", apiDirectIncludeAllTools: true, apiDirectMaxTools: 8 }
+            );
+
+            const names = (out.tools ?? []).map(t => t.function.name);
+            assert.ok(names.includes("run_vscode_command"));
+            assert.ok(names.includes("run_in_terminal"));
+        });
+
+        test("convertTools apiDirect include-all keeps browser and search tools", () => {
+            const out = convertTools(
+                {
+                    toolMode: vscode.LanguageModelChatToolMode.Auto,
+                    tools: [
+                        { name: "open_browser_page", description: "Open browser page", inputSchema: { type: "object", properties: {} } },
+                        { name: "read_page", description: "Read browser page", inputSchema: { type: "object", properties: {} } },
+                        { name: "click_element", description: "Click element", inputSchema: { type: "object", properties: {} } },
+                        { name: "grep_search", description: "Lexical search", inputSchema: { type: "object", properties: {} } },
+                        { name: "semantic_search", description: "Semantic search", inputSchema: { type: "object", properties: {} } },
+                    ],
+                } satisfies vscode.ProvideLanguageModelChatResponseOptions,
+                { mode: "apiDirect", apiDirectIncludeAllTools: true, apiDirectMaxTools: 128 }
+            );
+
+            const names = new Set((out.tools ?? []).map(t => t.function.name));
+            assert.ok(names.has("open_browser_page"));
+            assert.ok(names.has("read_page"));
+            assert.ok(names.has("click_element"));
+            assert.ok(names.has("grep_search"));
+            assert.ok(names.has("semantic_search"));
+        });
+
+        test("convertTools apiDirect include-all respects max tools cap", () => {
+            const out = convertTools(
+                {
+                    toolMode: vscode.LanguageModelChatToolMode.Auto,
+                    tools: [
+                        { name: "open_browser_page", description: "Open browser page", inputSchema: { type: "object", properties: {} } },
+                        { name: "read_page", description: "Read browser page", inputSchema: { type: "object", properties: {} } },
+                        { name: "click_element", description: "Click element", inputSchema: { type: "object", properties: {} } },
+                        { name: "grep_search", description: "Lexical search", inputSchema: { type: "object", properties: {} } },
+                        { name: "semantic_search", description: "Semantic search", inputSchema: { type: "object", properties: {} } },
+                    ],
+                } satisfies vscode.ProvideLanguageModelChatResponseOptions,
+                { mode: "apiDirect", apiDirectIncludeAllTools: true, apiDirectMaxTools: 3 }
+            );
+
+            assert.equal((out.tools ?? []).length, 3);
         });
     });
 

@@ -35,6 +35,18 @@ export interface OpenAIFunctionToolDef {
 }
 
 /**
+ * Content block for multimodal (vision) messages following OpenAI format.
+ */
+export interface OpenAIContentPart {
+	type: "text" | "image_url";
+	text?: string;
+	image_url?: {
+		url: string;
+		detail?: "auto" | "low" | "high";
+	};
+}
+
+/**
  * OpenAI-style chat message used for router requests.
  * Represents a message in a chat conversation, compatible with OpenAI's API format.
  *
@@ -46,8 +58,9 @@ export interface OpenAIChatMessage {
 	role: OpenAIChatRole;
 	/**
 	 * Content of the message, optional for some roles.
+	 * For multimodal (vision) messages this is an array of content parts.
 	 */
-	content?: string;
+	content?: string | OpenAIContentPart[];
 	/**
 	 * Name of the sender, optional.
 	 */
