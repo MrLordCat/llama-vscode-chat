@@ -32,6 +32,7 @@ import {
     resolveRequestThinkingMode,
 } from "./reasoning";
 import { buildChatCompletionRequest } from "./request/chat-request";
+import { SerialRequestQueue, type ChatRequestSlotLease } from "./transport/request-queue";
 import type { OpenAIChatMessage } from "./types";
 
 type ToolResultModeConfig = "auto" | "tool" | "user";
@@ -132,19 +133,6 @@ interface PreparedMessagesForBudget {
     hardTarget: number;
 }
 
-interface ChatRequestSlotLease {
-    release: () => void;
-    waitMs: number;
-}
-
-interface ChatRequestQueueWaiter {
-    requestId: string;
-    queuedAt: number;
-    resolve: (lease: ChatRequestSlotLease) => void;
-    reject: (error: Error) => void;
-    cleanup: () => void;
-}
-
 /**
  * Chat model provider for Llama.cpp servers.
  * Implements the VS Code language model chat provider interface for Llama.cpp compatible APIs.
@@ -161,8 +149,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
     private readonly modelListCache = new Map<string, ModelListCacheEntry>();
     private readonly modelListInflight = new Map<string, ModelListInflightEntry>();
     private readonly runtimeContextCache = new Map<string, RuntimeContextCacheEntry>();
-    private activeChatRequests = 0;
-    private readonly chatRequestQueue: ChatRequestQueueWaiter[] = [];
+    private readonly chatRequestQueue: SerialRequestQueue;
 
     /**
      * Creates a new Llama.cpp chat model provider.
@@ -178,6 +165,10 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         private readonly sharedMemory?: SharedMemoryContextProvider
     ) {
         super(secrets);
+        this.chatRequestQueue = new SerialRequestQueue(event => {
+            const { type, ...data } = event;
+            this.log(`chat.queue.${type}`, data);
+        });
     }
 
     refreshLanguageModelChatInformation(): void {
@@ -1091,124 +1082,12 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         queueTimeoutMs: number,
         token: CancellationToken
     ): Promise<ChatRequestSlotLease> {
-        if (token.isCancellationRequested) {
-            return Promise.reject(new vscode.CancellationError());
-        }
-
-        if (this.activeChatRequests === 0) {
-            this.activeChatRequests += 1;
-            this.log("chat.queue.acquired", {
-                requestId,
-                waitMs: 0,
-                queueLength: this.chatRequestQueue.length,
-            });
-            return Promise.resolve({
-                waitMs: 0,
-                release: () => this.releaseChatRequestSlot(requestId),
-            });
-        }
-
-        const queuedAt = Date.now();
-        this.log("chat.queue.wait", {
+        return this.chatRequestQueue.acquire(
             requestId,
-            activeChatRequests: this.activeChatRequests,
-            queueLength: this.chatRequestQueue.length + 1,
             queueTimeoutMs,
-        });
-
-        return new Promise<ChatRequestSlotLease>((resolve, reject) => {
-            let settled = false;
-            let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-            let cancellationSubscription: vscode.Disposable | undefined;
-
-            const removeWaiter = (waiter: ChatRequestQueueWaiter): void => {
-                const index = this.chatRequestQueue.indexOf(waiter);
-                if (index !== -1) {
-                    this.chatRequestQueue.splice(index, 1);
-                }
-            };
-
-            const cleanup = (): void => {
-                if (timeoutHandle) {
-                    clearTimeout(timeoutHandle);
-                    timeoutHandle = undefined;
-                }
-                cancellationSubscription?.dispose();
-                cancellationSubscription = undefined;
-            };
-
-            const waiter: ChatRequestQueueWaiter = {
-                requestId,
-                queuedAt,
-                cleanup,
-                resolve: lease => {
-                    if (settled) {
-                        lease.release();
-                        return;
-                    }
-                    settled = true;
-                    cleanup();
-                    const waitMs = Date.now() - queuedAt;
-                    this.log("chat.queue.acquired", {
-                        requestId,
-                        waitMs,
-                        queueLength: this.chatRequestQueue.length,
-                    });
-                    resolve({
-                        waitMs,
-                        release: lease.release,
-                    });
-                },
-                reject: error => {
-                    if (settled) {
-                        return;
-                    }
-                    settled = true;
-                    cleanup();
-                    reject(error);
-                },
-            };
-
-            cancellationSubscription = token.onCancellationRequested(() => {
-                removeWaiter(waiter);
-                waiter.reject(new vscode.CancellationError());
-            });
-
-            if (queueTimeoutMs > 0) {
-                timeoutHandle = setTimeout(() => {
-                    removeWaiter(waiter);
-                    waiter.reject(new Error(`Timed out waiting ${queueTimeoutMs}ms for local llama.cpp request slot`));
-                }, queueTimeoutMs);
-            }
-
-            this.chatRequestQueue.push(waiter);
-        });
-    }
-
-    private releaseChatRequestSlot(requestId: string): void {
-        this.activeChatRequests = Math.max(0, this.activeChatRequests - 1);
-        this.log("chat.queue.released", {
-            requestId,
-            queueLength: this.chatRequestQueue.length,
-        });
-        this.drainChatRequestQueue();
-    }
-
-    private drainChatRequestQueue(): void {
-        if (this.activeChatRequests > 0) {
-            return;
-        }
-
-        const waiter = this.chatRequestQueue.shift();
-        if (!waiter) {
-            return;
-        }
-
-        this.activeChatRequests += 1;
-        waiter.resolve({
-            waitMs: Date.now() - waiter.queuedAt,
-            release: () => this.releaseChatRequestSlot(waiter.requestId),
-        });
+            token,
+            () => new vscode.CancellationError()
+        );
     }
 
     private async captureRawStream(

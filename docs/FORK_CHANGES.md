@@ -91,6 +91,7 @@ repository metadata, documentation, and release artifacts belong to the fork.
 | SSE, text, thinking, and tool parsing | `src/base-provider.ts` |
 | Context budgets and native usage | `src/context/` |
 | Local and DeepSeek request profiles | `src/request/` |
+| Serial request admission | `src/transport/` |
 | Shared memory | `src/memory/` |
 | Reasoning profiles | `src/reasoning.ts` |
 | Quick Access | `src/ui/quick-access.ts` |

@@ -47,6 +47,13 @@ Completed in the fourth refactoring pass:
 - removed source-specific sampling, reasoning, cache, usage, and tool-field
   assembly from the request lifecycle method.
 
+Completed in the fifth refactoring pass:
+
+- extracted serial request admission from the provider into a transport queue;
+- added isolated coverage for FIFO ordering, cancellation, queue timeout, and
+  idempotent lease release;
+- kept queue telemetry compatible with the existing structured log events.
+
 ## Findings
 
 ### High Priority
@@ -91,7 +98,8 @@ Completed in the fourth refactoring pass:
 
 1. Extract model source discovery and source-specific credentials.
 2. Extract the remaining context compaction policy (budget arithmetic is done).
-3. Extract transport queue and retry state machine.
+3. Extract the remaining request execution and retry state machine (queueing is
+   done).
 4. Split extension commands and status presentation (Quick Access is done).
 5. Add CI and release automation.
 
