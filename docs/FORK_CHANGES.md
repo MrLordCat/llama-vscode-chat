@@ -48,6 +48,8 @@ repository metadata, documentation, and release artifacts belong to the fork.
   with cached fallback-safe `/apply-template` and `/tokenize` requests.
 - Compaction retains bounded tool names, safe arguments, paths, statuses,
   diagnostics, and JSON structure instead of dropping old tool results entirely.
+- Compaction keeps complete user turns, preserves code/decision milestones, and
+  records its own duration separately from exact tokenizer preflight latency.
 - llama.cpp and DeepSeek cache-hit counters are normalized and shown in Quick
   Access diagnostics.
 

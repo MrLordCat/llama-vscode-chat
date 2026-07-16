@@ -78,12 +78,19 @@ that prefix in several ways:
 - Retrieved shared memory is inserted immediately before the latest user turn,
   rather than rewriting the first system message.
 - Raw tool results are sanitized and capped before budgeting.
-- Compaction copies messages and runs only near the configured soft target.
+- Compaction copies messages, runs only near the configured soft target, and
+  removes whole conversation turns instead of breaking tool-call/result pairs.
+- Old assistant turns retain bounded code edges, decisions, paths, diagnostics,
+  and next steps without an additional LLM request.
 
 Compaction necessarily changes the prefix once because old turns are replaced
 by a summary. Later turns can reuse that new compacted prefix. Switching models,
 changing system instructions, changing tool catalogs, or alternating multiple
 independent chats on a single llama.cpp slot can also lower cache reuse.
+
+`chat.messages.auto_compact`, `chat.messages.hard_compact`, and overflow retry
+logs report `compactDurationMs`. Exact `/apply-template` + `/tokenize` preflight
+latency is reported separately by `chat.tokens.count.durationMs`.
 
 ## Measuring Cache Reuse
 

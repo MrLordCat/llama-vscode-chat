@@ -62,7 +62,7 @@ Both llama.cpp `prompt_tokens_details.cached_tokens` and DeepSeek
 
 - TypeScript strict compilation.
 - ESLint with no current findings.
-- 79 VS Code extension-host tests covering routing, context, requests,
+- 89 VS Code extension-host tests covering routing, context, requests,
   transport, queues, streaming, usage, tools, memory, and UI structure.
 - `npm audit` reports no known dependency vulnerabilities after controlled
   test-tool overrides.
@@ -73,8 +73,10 @@ Both llama.cpp `prompt_tokens_details.cached_tokens` and DeepSeek
 ## Residual Risks
 
 - Token estimation remains character-based when a server omits exact usage.
-- Deterministic compaction is intentionally lossy; model-assisted summarization
-  could preserve more semantics but would add latency, cost, and failure modes.
+- Deterministic compaction is bounded and therefore intentionally lossy, but it
+  preserves complete tool turns and code-aware milestones. Model-assisted
+  summarization remains omitted by design because it would add generation
+  latency, queue contention, cost, and new failure modes.
 - Prompt cache reuse depends on server slot policy and exact prefix stability;
   alternating unrelated chats on one slot can still replace the useful cache.
 - The Copilot patch targets private bundled code and must be revalidated after

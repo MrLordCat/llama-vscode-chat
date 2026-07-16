@@ -250,6 +250,14 @@ cached briefly. Servers without those endpoints, and DeepSeek, use the existing
 conservative estimate. Old history is compacted when the resolved count
 approaches the model context limit.
 
+Compaction is deterministic and does not run an extra model generation. It
+keeps complete user turns so assistant tool calls are never separated from
+their tool results, and extracts bounded decisions, file paths, diagnostics,
+code edges, and next steps from older turns. The compact operation and exact
+tokenizer preflight have separate durations in logs (`compactDurationMs` and
+`chat.tokens.count.durationMs`), which makes server-side tokenizer latency easy
+to distinguish from history processing.
+
 Important settings:
 
 ```json

@@ -1828,6 +1828,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             });
 
             if (autoCompact && messageTokenCount > softInputTarget) {
+                const compactStartedAt = Date.now();
                 preparedMessages = this.compactOpenAiMessages(
                     preparedMessages,
                     softInputTarget,
@@ -1844,10 +1845,12 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     promptTokens: counted.promptTokens,
                     messageCount: preparedMessages.length,
                     target: softInputTarget,
+                    compactDurationMs: Date.now() - compactStartedAt,
                 });
             }
 
             if (messageTokenCount > softInputTarget) {
+                const compactStartedAt = Date.now();
                 preparedMessages = this.compactOpenAiMessages(
                     preparedMessages,
                     hardTarget,
@@ -1864,6 +1867,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     promptTokens: counted.promptTokens,
                     messageCount: preparedMessages.length,
                     target: hardTarget,
+                    compactDurationMs: Date.now() - compactStartedAt,
                 });
                 if (messageTokenCount > hardTarget) {
                     this.log("chat.messages.compact_failed", {
@@ -1990,6 +1994,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 });
                 if (this.isContextOverflowError(response.status, errText)) {
                     const hardTarget = hardInputTarget;
+                    const compactStartedAt = Date.now();
                     const overflowMessages = this.compactOpenAiMessages(
                         prepared.messages,
                         hardTarget,
@@ -2031,6 +2036,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                         requestId,
                         attemptNo,
                         hardTarget,
+                        compactDurationMs: Date.now() - compactStartedAt,
                         retryMessageCount: Array.isArray(requestBody.messages)
                             ? requestBody.messages.length
                             : undefined,
