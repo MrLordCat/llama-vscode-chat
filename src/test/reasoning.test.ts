@@ -38,7 +38,8 @@ suite("reasoning", () => {
 		assert.strictEqual(resolveReasoningBudget("deep", 4096), 4096);
 		assert.strictEqual(resolveReasoningBudget("balanced", 1024), 1024);
 		assert.strictEqual(resolveReasoningBudget("light", 8192), 512);
-		assert.strictEqual(resolveReasoningBudget("auto", Number.NaN), 8192);
+		assert.strictEqual(resolveReasoningBudget("auto", Number.NaN), 16384);
+		assert.strictEqual(resolveReasoningBudget("deep", 16384), 16384);
 		assert.strictEqual(toDeepSeekReasoningEffort("off"), undefined);
 		assert.strictEqual(toDeepSeekReasoningEffort("balanced"), "high");
 		assert.strictEqual(toDeepSeekReasoningEffort("deep"), "max");

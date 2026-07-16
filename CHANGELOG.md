@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.1 - 2026-07-16
+
+- Increased the default local High/Deep reasoning cap from 8192 to 16384
+  tokens for complex Qwen coding and agent tasks.
+- Kept Light and Balanced at 512 and 2048 tokens.
+- Prevented DeepSeek setup from overwriting the local numeric reasoning cap.
+
 ## 1.0.0 - 2026-07-16
 
 - Established the independent MrLordCat extension and release workflow.

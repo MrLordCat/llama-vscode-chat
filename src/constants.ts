@@ -8,3 +8,4 @@ export const DEEPSEEK_SERVER_URL = "https://api.deepseek.com";
 export const DEEPSEEK_DISCOVERY_TIMEOUT_MS = 20000;
 export const DEEPSEEK_CONTEXT_LENGTH = 1048576;
 export const DEEPSEEK_MAX_OUTPUT_TOKENS = 393216;
+export const DEFAULT_LOCAL_REASONING_BUDGET = 16384;

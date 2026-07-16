@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 
-import { CONFIG_SECTION, DEFAULT_SERVER_URL } from "../constants";
+import { CONFIG_SECTION, DEFAULT_LOCAL_REASONING_BUDGET, DEFAULT_SERVER_URL } from "../constants";
 import { normalizeThinkingMode, resolveReasoningBudget } from "../reasoning";
 
 export interface QuickAccessContextUsage {
@@ -93,10 +93,10 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 		const localServerEnabled = config.get<boolean>("enableLocalServer", true) !== false;
 		const deepSeekEnabled = config.get<boolean>("enableDeepSeek", true) !== false;
 		const thinkingMode = String(config.get("thinkingMode", "auto"));
-		const reasoningBudget = Number(config.get("reasoningBudget", 8192));
+		const reasoningBudget = Number(config.get("reasoningBudget", DEFAULT_LOCAL_REASONING_BUDGET));
 		const effectiveReasoningBudget = resolveReasoningBudget(
 			normalizeThinkingMode(thinkingMode),
-			Number.isFinite(reasoningBudget) ? reasoningBudget : 8192
+			Number.isFinite(reasoningBudget) ? reasoningBudget : DEFAULT_LOCAL_REASONING_BUDGET
 		);
 		const toolResultMode = String(config.get("toolResultMode", "auto"));
 		const toolCallingMode = String(config.get("toolCallingMode", "classic"));

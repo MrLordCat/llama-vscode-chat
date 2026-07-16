@@ -378,7 +378,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			await config.update("apiDirectIncludeAllTools", false, vscode.ConfigurationTarget.Global);
 			await config.update("apiDirectToolTokenBudget", 12000, vscode.ConfigurationTarget.Global);
 			await config.update("deepSeekDefaultMaxOutputTokens", 65536, vscode.ConfigurationTarget.Global);
-			await config.update("reasoningBudget", 8192, vscode.ConfigurationTarget.Global);
 			await config.update("toolResultMode", "auto", vscode.ConfigurationTarget.Global);
 			await config.update("autoCompact", true, vscode.ConfigurationTarget.Global);
 			await config.update("retryOnContextOverflow", true, vscode.ConfigurationTarget.Global);

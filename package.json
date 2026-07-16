@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/MrLordCat/llama-vscode-chat.git"
 	},
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"engines": {
 		"vscode": "^1.104.0"
 	},
@@ -292,10 +292,10 @@
 				},
 				"llamacpp.reasoningBudget": {
 					"type": "number",
-					"default": 8192,
+					"default": 16384,
 					"minimum": 256,
 					"maximum": 65536,
-					"description": "Maximum hidden reasoning tokens for compatible local servers. light uses up to 512, balanced up to 2048, and deep/auto use this cap. DeepSeek uses high/max effort instead of this numeric value."
+					"description": "Maximum hidden reasoning tokens for compatible local servers. light uses up to 512, balanced up to 2048, and high/deep/auto use this cap. DeepSeek uses high/max effort instead of this numeric value."
 				},
 				"llamacpp.toolResultMode": {
 					"type": "string",

@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 
-import { CONFIG_SECTION } from "../constants";
+import { CONFIG_SECTION, DEFAULT_LOCAL_REASONING_BUDGET } from "../constants";
 import type { ThinkingMode } from "../reasoning";
 
 type ToolResultMode = "auto" | "tool" | "user";
@@ -64,11 +64,11 @@ export function registerModelBehaviorCommands(refresh: () => void): vscode.Dispo
 		}),
 		vscode.commands.registerCommand("llamacpp.setReasoningBudget", async () => {
 			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
-			const current = Number(config.get("reasoningBudget", 8192));
+			const current = Number(config.get("reasoningBudget", DEFAULT_LOCAL_REASONING_BUDGET));
 			const value = await vscode.window.showInputBox({
 				title: "Local LLM Reasoning Cap",
 				prompt: "Maximum hidden reasoning tokens for local models; DeepSeek uses High or Max effort",
-				value: Number.isFinite(current) ? String(current) : "8192",
+				value: Number.isFinite(current) ? String(current) : String(DEFAULT_LOCAL_REASONING_BUDGET),
 				ignoreFocusOut: true,
 				validateInput: input => {
 					if (!/^\d+$/.test(input.trim())) {

@@ -15,6 +15,7 @@ import {
 import { BaseChatModelProvider, DEFAULT_CONTEXT_LENGTH, DEFAULT_MAX_OUTPUT_TOKENS } from "./base-provider";
 import {
     CONFIG_SECTION,
+    DEFAULT_LOCAL_REASONING_BUDGET,
     DEEPSEEK_CONTEXT_LENGTH,
     DEEPSEEK_MAX_OUTPUT_TOKENS,
     DEFAULT_SERVER_URL,
@@ -1469,7 +1470,12 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             cfg.get("thinkingMode", "auto"),
             options.modelOptions
         );
-        const configuredReasoningBudget = this.clampInt(cfg.get("reasoningBudget", 8192), 256, 65536, 8192);
+        const configuredReasoningBudget = this.clampInt(
+            cfg.get("reasoningBudget", DEFAULT_LOCAL_REASONING_BUDGET),
+            256,
+            65536,
+            DEFAULT_LOCAL_REASONING_BUDGET
+        );
         const reasoningBudget = resolveReasoningBudget(thinkingMode, configuredReasoningBudget);
         const toolResultModeConfig = this.normalizeToolResultMode(cfg.get("toolResultMode", "auto"));
         const toolCallingModeConfig = this.normalizeToolCallingMode(cfg.get("toolCallingMode", "apiDirect"));

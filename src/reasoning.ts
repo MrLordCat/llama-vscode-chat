@@ -1,3 +1,5 @@
+import { DEFAULT_LOCAL_REASONING_BUDGET } from "./constants";
+
 export type ThinkingMode = "off" | "light" | "balanced" | "deep" | "auto";
 
 const THINKING_MODE_ALIASES: Readonly<Record<string, ThinkingMode>> = {
@@ -39,7 +41,9 @@ export function resolveRequestThinkingMode(
 }
 
 export function resolveReasoningBudget(mode: ThinkingMode, configuredBudget: number): number {
-	const normalizedBudget = Number.isFinite(configuredBudget) ? configuredBudget : 8192;
+	const normalizedBudget = Number.isFinite(configuredBudget)
+		? configuredBudget
+		: DEFAULT_LOCAL_REASONING_BUDGET;
 	const cap = Math.max(256, Math.min(65536, Math.floor(normalizedBudget)));
 	switch (mode) {
 		case "off":

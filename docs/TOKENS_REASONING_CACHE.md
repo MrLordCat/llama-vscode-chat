@@ -6,15 +6,15 @@ The extension does not use one number for every purpose:
 
 | Setting | Purpose | Recommended default |
 | --- | --- | --- |
-| `reasoningBudget` | Maximum hidden reasoning tokens for compatible local llama.cpp servers | 8192 |
+| `reasoningBudget` | Maximum hidden reasoning tokens for compatible local llama.cpp servers | 16384 |
 | `localDefaultMaxOutputTokens` | Normal local `max_tokens` when the session supplies no explicit value | 32768 |
 | `deepSeekDefaultMaxOutputTokens` | Normal DeepSeek `max_tokens` | 65536 |
 | `maxOutputTokensCap` | Absolute ceiling applied after session, model, and source limits | 131072 local / 393216 DeepSeek maximum |
 
 `max_tokens` covers the complete generated sequence. For a reasoning model that
-means hidden reasoning plus the visible answer. A local request with an 8192
-reasoning cap and `max_tokens=32768` can spend up to 8192 tokens reasoning and
-still has roughly 24576 tokens available for the answer.
+means hidden reasoning plus the visible answer. A local request with a 16384
+reasoning cap and `max_tokens=32768` can split the available generation space
+evenly between hidden reasoning and the visible answer.
 
 The provider reserves the resolved `max_tokens` while calculating available
 input context. A large hard ceiling no longer becomes the default reservation.
@@ -34,7 +34,7 @@ For local requests the extension sends:
 ```json
 {
   "chat_template_kwargs": { "enable_thinking": true },
-  "thinking_budget_tokens": 8192
+  "thinking_budget_tokens": 16384
 }
 ```
 
@@ -89,7 +89,7 @@ Quality-oriented local coding:
 ```json
 {
   "llamacpp.thinkingMode": "deep",
-  "llamacpp.reasoningBudget": 8192,
+  "llamacpp.reasoningBudget": 16384,
   "llamacpp.localDefaultMaxOutputTokens": 32768,
   "llamacpp.cachePrompt": true,
   "llamacpp.toolCallingMode": "apiDirect",

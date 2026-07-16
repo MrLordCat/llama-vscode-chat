@@ -75,6 +75,8 @@ Recommended local defaults:
   "llamacpp.cachePrompt": true,
   "llamacpp.autoCompact": true,
   "llamacpp.retryOnContextOverflow": true,
+  "llamacpp.thinkingMode": "deep",
+  "llamacpp.reasoningBudget": 16384,
   "llamacpp.toolCallingMode": "apiDirect",
   "llamacpp.apiDirectIncludeAllTools": false,
   "llamacpp.apiDirectMaxTools": 48,
@@ -105,7 +107,6 @@ profile:
   "llamacpp.maxOutputTokensCap": 393216,
   "llamacpp.deepSeekDefaultMaxOutputTokens": 65536,
   "llamacpp.thinkingMode": "deep",
-  "llamacpp.reasoningBudget": 8192,
   "llamacpp.toolCallingMode": "apiDirect",
   "llamacpp.apiDirectMaxTools": 48,
   "llamacpp.apiDirectIncludeAllTools": false,
@@ -218,7 +219,7 @@ The controls have separate jobs:
 - `maxOutputTokensCap` is the final safety ceiling.
 
 For local llama.cpp requests, Light uses up to 512 hidden tokens, Balanced up
-to 2048, and Deep/Auto use `reasoningBudget`. The extension sends
+to 2048, and High/Deep/Auto use `reasoningBudget`. The extension sends
 `chat_template_kwargs.enable_thinking` and `thinking_budget_tokens`, which are
 recognized by the maintained llama.cpp server fork. `max_tokens` includes both
 hidden reasoning and visible output, so it must remain larger than the reasoning
