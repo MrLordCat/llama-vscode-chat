@@ -12,7 +12,9 @@ export default tseslint.config(
 	{
 		ignores: [
 			'.vscode-test',
+			'.venv',
 			'out',
+			'subprojects',
 			'**/*.d.ts'
 		]
 	},
@@ -22,6 +24,16 @@ export default tseslint.config(
 	js.configs.recommended,
 	...tseslint.configs.recommended,
 	...tseslint.configs.stylistic,
+	{
+		files: ['scripts/**/*.mjs'],
+		languageOptions: {
+			globals: {
+				console: 'readonly',
+				process: 'readonly',
+				URL: 'readonly'
+			}
+		}
+	},
 	{
 		plugins: {
 			'@stylistic': stylistic

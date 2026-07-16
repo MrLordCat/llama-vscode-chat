@@ -1,14 +1,14 @@
 {
 	"name": "llama-vscode-chat",
-	"publisher": "maruf-bepary",
-	"displayName": "Llama.cpp Provider for GitHub Copilot Chat",
-	"description": "An extension that integrates Llama.cpp into GitHub Copilot Chat",
+	"publisher": "mrlordcat",
+	"displayName": "Local LLM Chat Provider",
+	"description": "Use local OpenAI-compatible models and DeepSeek in VS Code Chat with tools, shared memory, context control, and diagnostics.",
 	"icon": "assets/logo.png",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/mbeps/llama-vscode-chat"
+		"url": "https://github.com/MrLordCat/llama-vscode-chat.git"
 	},
-	"version": "0.2.11",
+	"version": "0.6.0",
 	"engines": {
 		"vscode": "^1.104.0"
 	},
@@ -21,9 +21,9 @@
 		"theme": "dark"
 	},
 	"badges": [],
-	"homepage": "https://github.com/mbeps/llama-vscode-chat",
+	"homepage": "https://github.com/MrLordCat/llama-vscode-chat",
 	"bugs": {
-		"url": "https://github.com/mbeps/llama-vscode-chat/issues"
+		"url": "https://github.com/MrLordCat/llama-vscode-chat/issues"
 	},
 	"license": "MIT",
 	"activationEvents": [
@@ -34,7 +34,7 @@
 		"languageModelChatProviders": [
 			{
 				"vendor": "llamacpp",
-				"displayName": "Llama.cpp",
+				"displayName": "Local LLM",
 				"managementCommand": "llamacpp.manage"
 			}
 		],
@@ -42,7 +42,7 @@
 			"activitybar": [
 				{
 					"id": "llamacpp-sidebar",
-					"title": "Llama.cpp",
+					"title": "Local LLM",
 					"icon": "assets/activity-icon.svg"
 				}
 			]
@@ -57,12 +57,34 @@
 			]
 		},
 		"configuration": {
-			"title": "Llama.cpp Provider",
+			"title": "Local LLM Provider",
 			"properties": {
 				"llamacpp.serverUrl": {
 					"type": "string",
 					"default": "http://localhost:8000",
-					"description": "OpenAI-compatible llama.cpp server URL. The old secret-stored URL is still used as a fallback."
+					"description": "Primary OpenAI-compatible server URL. Kept for backward compatibility; local and DeepSeek sources can also be enabled separately."
+				},
+				"llamacpp.enableLocalServer": {
+					"type": "boolean",
+					"default": true,
+					"description": "Also advertise models from a local OpenAI-compatible llama.cpp server without switching the primary server URL."
+				},
+				"llamacpp.localServerUrl": {
+					"type": "string",
+					"default": "http://localhost:8000",
+					"description": "Local OpenAI-compatible llama.cpp server URL advertised alongside DeepSeek or the primary server."
+				},
+				"llamacpp.localContextLength": {
+					"type": "number",
+					"default": 65536,
+					"minimum": 4096,
+					"maximum": 1048576,
+					"description": "Fallback context length for the dedicated local server source when runtime metadata is unavailable."
+				},
+				"llamacpp.enableDeepSeek": {
+					"type": "boolean",
+					"default": true,
+					"description": "Also advertise DeepSeek models from https://api.deepseek.com when an API key is configured."
 				},
 				"llamacpp.contextLength": {
 					"type": "number",
@@ -264,6 +286,23 @@
 					"default": "auto",
 					"description": "How tool results are sent back to model context: auto (prefer tool role, fallback to user), tool (always OpenAI tool role), user (always flattened user text)."
 				},
+				"llamacpp.memoryEnabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "Enable shared durable memory across chats, workspaces, local models, and DeepSeek."
+				},
+				"llamacpp.memoryAutoInject": {
+					"type": "boolean",
+					"default": true,
+					"description": "Automatically add relevant shared memory entries to each model request."
+				},
+				"llamacpp.memoryMaxTokens": {
+					"type": "number",
+					"default": 4096,
+					"minimum": 128,
+					"maximum": 32768,
+					"description": "Maximum estimated tokens reserved for automatically injected shared memory."
+				},
 				"llamacpp.enableFileLogging": {
 					"type": "boolean",
 					"default": true,
@@ -300,87 +339,234 @@
 				}
 			}
 		},
+		"languageModelTools": [
+			{
+				"name": "llamacpp_store_memory",
+				"displayName": "Store Shared Memory",
+				"toolReferenceName": "storeSharedMemory",
+				"modelDescription": "Create or update a durable user-approved memory entry shared across VS Code chats, workspaces, local models, and DeepSeek. Use it for stable preferences, project decisions, environment facts, and reusable workflow knowledge. Do not store secrets, transient chat details, or guesses.",
+				"userDescription": "Save durable context for future chats and models.",
+				"canBeReferencedInPrompt": true,
+				"icon": "$(database)",
+				"tags": [
+					"memory",
+					"llamacpp"
+				],
+				"inputSchema": {
+					"type": "object",
+					"properties": {
+						"id": {
+							"type": "string",
+							"description": "Existing memory entry id to update. Omit to create a new entry."
+						},
+						"title": {
+							"type": "string",
+							"description": "Short descriptive title for the durable fact or decision."
+						},
+						"content": {
+							"type": "string",
+							"description": "Self-contained memory content that remains understandable in a future chat."
+						},
+						"tags": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							},
+							"description": "Optional lowercase search tags."
+						},
+						"pinned": {
+							"type": "boolean",
+							"description": "Always prioritize this entry for context injection."
+						}
+					},
+					"required": [
+						"title",
+						"content"
+					],
+					"additionalProperties": false
+				}
+			},
+			{
+				"name": "llamacpp_search_memory",
+				"displayName": "Search Shared Memory",
+				"toolReferenceName": "searchSharedMemory",
+				"modelDescription": "Search durable shared memory when exact prior preferences, project decisions, environment facts, or reusable workflow knowledge are needed. An empty query lists recent and pinned entries.",
+				"userDescription": "Find durable context saved by this extension.",
+				"canBeReferencedInPrompt": true,
+				"icon": "$(search)",
+				"tags": [
+					"memory",
+					"llamacpp"
+				],
+				"inputSchema": {
+					"type": "object",
+					"properties": {
+						"query": {
+							"type": "string",
+							"description": "Keywords describing the memory to retrieve."
+						},
+						"limit": {
+							"type": "number",
+							"minimum": 1,
+							"maximum": 50,
+							"description": "Maximum number of entries to return."
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			{
+				"name": "llamacpp_delete_memory",
+				"displayName": "Delete Shared Memory",
+				"toolReferenceName": "deleteSharedMemory",
+				"modelDescription": "Delete one durable shared memory entry by exact id when it is obsolete or incorrect. Never use this tool speculatively.",
+				"userDescription": "Remove an obsolete durable memory entry.",
+				"canBeReferencedInPrompt": true,
+				"icon": "$(trash)",
+				"tags": [
+					"memory",
+					"llamacpp"
+				],
+				"inputSchema": {
+					"type": "object",
+					"properties": {
+						"id": {
+							"type": "string",
+							"description": "Exact id of the memory entry to delete."
+						}
+					},
+					"required": [
+						"id"
+					],
+					"additionalProperties": false
+				}
+			}
+		],
 		"commands": [
 			{
 				"command": "llamacpp.openSidebar",
-				"title": "Llama.cpp: Open Sidebar"
+				"title": "Local LLM: Open Sidebar"
 			},
 			{
 				"command": "llamacpp.manage",
-				"title": "Manage Llama.cpp Provider"
+				"title": "Local LLM: Manage Primary Server"
+			},
+			{
+				"command": "llamacpp.setLocalServerUrl",
+				"title": "Local LLM: Set Local Server URL"
+			},
+			{
+				"command": "llamacpp.toggleLocalServer",
+				"title": "Local LLM: Toggle Local Server Source"
+			},
+			{
+				"command": "llamacpp.toggleDeepSeek",
+				"title": "Local LLM: Toggle DeepSeek Source"
 			},
 			{
 				"command": "llamacpp.configureDeepSeek",
-				"title": "Llama.cpp: Configure DeepSeek"
+				"title": "Local LLM: Configure DeepSeek"
 			},
 			{
 				"command": "llamacpp.setApiKey",
-				"title": "Llama.cpp: Set API Key"
+				"title": "Local LLM: Set Primary API Key"
 			},
 			{
 				"command": "llamacpp.openSettings",
-				"title": "Llama.cpp: Open Settings"
+				"title": "Local LLM: Open Settings",
+				"icon": "$(settings-gear)"
+			},
+			{
+				"command": "llamacpp.openMemory",
+				"title": "Local LLM: Open Shared Memory"
+			},
+			{
+				"command": "llamacpp.clearMemory",
+				"title": "Local LLM: Clear Shared Memory"
 			},
 			{
 				"command": "llamacpp.setThinkingMode",
-				"title": "Llama.cpp: Set Thinking Mode"
+				"title": "Local LLM: Set Thinking Mode"
 			},
 			{
 				"command": "llamacpp.setReasoningBudget",
-				"title": "Llama.cpp: Set Reasoning Budget"
+				"title": "Local LLM: Set Reasoning Budget"
 			},
 			{
 				"command": "llamacpp.setToolResultMode",
-				"title": "Llama.cpp: Set Tool Result Mode"
+				"title": "Local LLM: Set Tool Result Mode"
 			},
 			{
 				"command": "llamacpp.setToolCallingMode",
-				"title": "Llama.cpp: Set Tool Calling Mode"
+				"title": "Local LLM: Set Tool Calling Mode"
 			},
 			{
 				"command": "llamacpp.refreshModels",
-				"title": "Llama.cpp: Refresh Models"
+				"title": "Local LLM: Refresh Models",
+				"icon": "$(refresh)"
 			},
 			{
 				"command": "llamacpp.openCopilotModelPicker",
-				"title": "Llama.cpp: Open Copilot Model Picker"
+				"title": "Local LLM: Choose Chat Model",
+				"icon": "$(comment-discussion)"
 			},
 			{
 				"command": "llamacpp.openLogsFolder",
-				"title": "Llama.cpp: Open Logs Folder"
+				"title": "Local LLM: Open Logs Folder"
 			},
 			{
 				"command": "llamacpp.openLatestLog",
-				"title": "Llama.cpp: Open Latest Log"
+				"title": "Local LLM: Open Latest Log"
 			},
 			{
 				"command": "llamacpp.copyLatestLogPath",
-				"title": "Llama.cpp: Copy Latest Log Path"
+				"title": "Local LLM: Copy Latest Log Path"
 			},
 			{
 				"command": "llamacpp.toggleFileLogging",
-				"title": "Llama.cpp: Toggle File Logging"
+				"title": "Local LLM: Toggle File Logging"
 			},
 			{
 				"command": "llamacpp.toggleStreamChunkLogging",
-				"title": "Llama.cpp: Toggle Stream Chunk Logging"
+				"title": "Local LLM: Toggle Stream Chunk Logging"
 			},
 			{
 				"command": "llamacpp.togglePerformanceStatusBar",
-				"title": "Llama.cpp: Toggle Performance Status Bar"
+				"title": "Local LLM: Toggle Performance Status Bar"
 			},
 			{
 				"command": "llamacpp.toggleContextUsageStatusBar",
-				"title": "Llama.cpp: Toggle Context Usage Status Bar"
+				"title": "Local LLM: Toggle Context Usage Status Bar"
 			}
-		]
+		],
+		"menus": {
+			"view/title": [
+				{
+					"command": "llamacpp.openCopilotModelPicker",
+					"when": "view == llamacpp-quick-actions",
+					"group": "navigation@1"
+				},
+				{
+					"command": "llamacpp.refreshModels",
+					"when": "view == llamacpp-quick-actions",
+					"group": "navigation@2"
+				},
+				{
+					"command": "llamacpp.openSettings",
+					"when": "view == llamacpp-quick-actions",
+					"group": "navigation@3"
+				}
+			]
+		}
 	},
 	"main": "./out/extension.js",
 	"scripts": {
-		"vscode:prepublish": "npm run compile",
-		"download-api": "dts dev",
-		"postdownload-api": "dts main",
-		"postinstall": "npm run download-api",
+		"vscode:prepublish": "npm run clean && npm run compile",
+		"clean": "node -e \"require('node:fs').rmSync('out', { recursive: true, force: true })\"",
+		"patch:copilot": "node ./scripts/patch-copilot-chat.mjs apply",
+		"patch:copilot:status": "node ./scripts/patch-copilot-chat.mjs status",
+		"patch:copilot:restore": "node ./scripts/patch-copilot-chat.mjs restore",
+		"update-vscode-api": "dts main && node ./scripts/move-vscode-api.mjs",
 		"compile": "tsc -p ./",
 		"lint": "eslint",
 		"format": "prettier --write .",

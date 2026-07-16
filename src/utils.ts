@@ -526,6 +526,8 @@ export function convertTools(
 			file_search: 185,
 			list_dir: 180,
 			get_errors: 176,
+			llamacpp_search_memory: 175,
+			llamacpp_store_memory: 174,
 			semantic_search: 172,
 			vscode_listCodeUsages: 168,
 			replace_string_in_file: 164,
@@ -547,6 +549,7 @@ export function convertTools(
 			github_text_search: 104,
 			terminal_last_command: 100,
 			terminal_selection: 96,
+			llamacpp_delete_memory: 92,
 		};
 		return directPriority[name] ?? 0;
 	};

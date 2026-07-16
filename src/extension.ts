@@ -6,26 +6,32 @@ import {
 	type LlamaChatContextUsageMetrics,
 	type LlamaChatTurnMetrics,
 } from "./llama-provider";
+import {
+	CONFIG_SECTION,
+	DEEPSEEK_DISCOVERY_TIMEOUT_MS,
+	DEEPSEEK_MAX_OUTPUT_TOKENS,
+	DEEPSEEK_SERVER_URL,
+	DEFAULT_SERVER_URL,
+	EXTENSION_ID,
+	EXTENSION_NAME,
+	PROVIDER_VENDOR,
+} from "./constants";
 import { LlamaLogService } from "./logger";
+import { SharedMemoryService } from "./memory/shared-memory-service";
+import { registerMemoryTools } from "./memory/tools";
+import type { ThinkingMode } from "./reasoning";
+import { LlamaQuickActionsProvider } from "./ui/quick-access";
 
-const EXTENSION_ID = "maruf-bepary.llama-vscode-chat";
-const DEFAULT_SERVER_URL = "http://localhost:8000";
-const DEEPSEEK_SERVER_URL = "https://api.deepseek.com";
-const DEEPSEEK_DISCOVERY_TIMEOUT_MS = 20000;
-const DEEPSEEK_CONTEXT_LENGTH = 1048576;
-const DEEPSEEK_MAX_OUTPUT_TOKENS = 393216;
-
-type ThinkingMode = "off" | "light" | "balanced" | "deep" | "auto";
 type ToolResultMode = "auto" | "tool" | "user";
 type ToolCallingMode = "classic" | "apiDirect";
 
-type ContextUsageDisplay = {
+interface ContextUsageDisplay {
 	summary: string;
 	breakdown: string;
 	statusBarText: string;
 	tooltip: string;
 	tooltipLines: string[];
-};
+}
 
 function formatNumber(value: number): string {
 	if (!Number.isFinite(value)) {
@@ -68,143 +74,10 @@ function formatContextUsage(metrics: LlamaChatContextUsageMetrics): ContextUsage
 	return {
 		summary,
 		breakdown,
-		statusBarText: `$(pie-chart) llama.cpp ctx ${usagePercent.toFixed(0)}%`,
+		statusBarText: `$(pie-chart) local LLM ctx ${usagePercent.toFixed(0)}%`,
 		tooltip: tooltipLines.join("\n"),
 		tooltipLines,
 	};
-}
-
-class QuickActionItem extends vscode.TreeItem {
-	constructor(label: string, description: string | undefined, command: vscode.Command) {
-		super(label, vscode.TreeItemCollapsibleState.None);
-		this.description = description;
-		this.command = command;
-		this.contextValue = "llamacpp.quickAction";
-	}
-}
-
-class LlamaQuickActionsProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
-	private readonly _onDidChangeTreeData = new vscode.EventEmitter<void>();
-	readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
-
-	constructor(
-		private readonly getLastThroughput: () => string | undefined,
-		private readonly getLastContextUsage: () => ContextUsageDisplay | undefined
-	) {}
-
-	refresh(): void {
-		this._onDidChangeTreeData.fire();
-	}
-
-	getTreeItem(element: vscode.TreeItem): vscode.TreeItem {
-		return element;
-	}
-
-	getChildren(): vscode.ProviderResult<vscode.TreeItem[]> {
-		const config = vscode.workspace.getConfiguration("llamacpp");
-		const serverUrl = String(config.get("serverUrl", DEFAULT_SERVER_URL) || DEFAULT_SERVER_URL);
-		const thinkingMode = String(config.get("thinkingMode", "auto"));
-		const reasoningBudget = Number(config.get("reasoningBudget", 2048));
-		const toolResultMode = String(config.get("toolResultMode", "auto"));
-		const toolCallingMode = String(config.get("toolCallingMode", "classic"));
-		const fileLoggingEnabled = config.get<boolean>("enableFileLogging", true) !== false;
-		const streamChunkLoggingEnabled = config.get<boolean>("logStreamChunks", false) === true;
-		const performanceStatusBarEnabled = config.get<boolean>("showPerformanceStatusBar", true) !== false;
-		const contextUsageStatusBarEnabled = config.get<boolean>("showContextUsageStatusBar", true) !== false;
-		const lastThroughput = this.getLastThroughput();
-		const lastContextUsage = this.getLastContextUsage();
-
-		return [
-			new QuickActionItem("Open Llama.cpp Sidebar", undefined, {
-				title: "Open Llama.cpp Sidebar",
-				command: "llamacpp.openSidebar",
-			}),
-			new QuickActionItem("Refresh Models", undefined, {
-				title: "Llama.cpp: Refresh Models",
-				command: "llamacpp.refreshModels",
-			}),
-			new QuickActionItem("Open Copilot Model Picker", undefined, {
-				title: "Open Copilot Model Picker",
-				command: "llamacpp.openCopilotModelPicker",
-			}),
-			new QuickActionItem("Manage Server URL", undefined, {
-				title: "Manage Llama.cpp Provider",
-				command: "llamacpp.manage",
-			}),
-			new QuickActionItem("Configure DeepSeek", undefined, {
-				title: "Configure DeepSeek",
-				command: "llamacpp.configureDeepSeek",
-			}),
-			new QuickActionItem("Manage API Key", undefined, {
-				title: "Manage API Key",
-				command: "llamacpp.setApiKey",
-			}),
-			new QuickActionItem("Server URL", serverUrl, {
-				title: "Manage Llama.cpp Provider",
-				command: "llamacpp.manage",
-			}),
-			new QuickActionItem("Open Llama.cpp Settings", undefined, {
-				title: "Open Llama.cpp Settings",
-				command: "llamacpp.openSettings",
-			}),
-			new QuickActionItem("Thinking Mode", thinkingMode, {
-				title: "Set Thinking Mode",
-				command: "llamacpp.setThinkingMode",
-			}),
-			new QuickActionItem("Reasoning Budget", Number.isFinite(reasoningBudget) ? String(reasoningBudget) : "auto", {
-				title: "Set Reasoning Budget",
-				command: "llamacpp.setReasoningBudget",
-			}),
-			new QuickActionItem("Tool Result Mode", toolResultMode, {
-				title: "Set Tool Result Mode",
-				command: "llamacpp.setToolResultMode",
-			}),
-			new QuickActionItem("Tool Calling Mode", toolCallingMode, {
-				title: "Set Tool Calling Mode",
-				command: "llamacpp.setToolCallingMode",
-			}),
-			new QuickActionItem("Open Logs Folder", undefined, {
-				title: "Llama.cpp: Open Logs Folder",
-				command: "llamacpp.openLogsFolder",
-			}),
-			new QuickActionItem("Open Latest Log", undefined, {
-				title: "Llama.cpp: Open Latest Log",
-				command: "llamacpp.openLatestLog",
-			}),
-			new QuickActionItem("Copy Latest Log Path", undefined, {
-				title: "Llama.cpp: Copy Latest Log Path",
-				command: "llamacpp.copyLatestLogPath",
-			}),
-			new QuickActionItem("File Logging", fileLoggingEnabled ? "on" : "off", {
-				title: "Llama.cpp: Toggle File Logging",
-				command: "llamacpp.toggleFileLogging",
-			}),
-			new QuickActionItem("Stream Chunk Logging", streamChunkLoggingEnabled ? "on" : "off", {
-				title: "Llama.cpp: Toggle Stream Chunk Logging",
-				command: "llamacpp.toggleStreamChunkLogging",
-			}),
-			new QuickActionItem("Performance Status Bar", performanceStatusBarEnabled ? "on" : "off", {
-				title: "Llama.cpp: Toggle Performance Status Bar",
-				command: "llamacpp.togglePerformanceStatusBar",
-			}),
-			new QuickActionItem("Context Usage Status Bar", contextUsageStatusBarEnabled ? "on" : "off", {
-				title: "Llama.cpp: Toggle Context Usage Status Bar",
-				command: "llamacpp.toggleContextUsageStatusBar",
-			}),
-			new QuickActionItem("Last Throughput", lastThroughput ?? "n/a", {
-				title: "Llama.cpp: Open Latest Log",
-				command: "llamacpp.openLatestLog",
-			}),
-			new QuickActionItem("Context Usage", lastContextUsage?.summary ?? "n/a", {
-				title: "Llama.cpp: Open Latest Log",
-				command: "llamacpp.openLatestLog",
-			}),
-			new QuickActionItem("Context Breakdown", lastContextUsage?.breakdown ?? "n/a", {
-				title: "Llama.cpp: Open Latest Log",
-				command: "llamacpp.openLatestLog",
-			}),
-		];
-	}
 }
 
 function getExplicitConfiguredServerUrl(config: vscode.WorkspaceConfiguration): string | undefined {
@@ -235,7 +108,7 @@ async function pickThinkingMode(current: ThinkingMode): Promise<ThinkingMode | u
 			value: option.value,
 		})),
 		{
-			title: "Llama.cpp Thinking Mode",
+			title: "Local LLM Thinking Mode",
 			ignoreFocusOut: true,
 		}
 	);
@@ -270,7 +143,7 @@ async function pickToolResultMode(current: ToolResultMode): Promise<ToolResultMo
 			value: option.value,
 		})),
 		{
-			title: "Llama.cpp Tool Result Mode",
+			title: "Local LLM Tool Result Mode",
 			ignoreFocusOut: true,
 		}
 	);
@@ -300,7 +173,7 @@ async function pickToolCallingMode(current: ToolCallingMode): Promise<ToolCallin
 			value: option.value,
 		})),
 		{
-			title: "Llama.cpp Tool Calling Mode",
+			title: "Local LLM Tool Calling Mode",
 			ignoreFocusOut: true,
 		}
 	);
@@ -344,7 +217,7 @@ async function openLlamaSidebar(): Promise<boolean> {
 		}
 	}
 
-	console.warn("[Llama.cpp] Failed to open sidebar", { candidates });
+	console.warn("[Local LLM] Failed to open sidebar", { candidates });
 	return false;
 }
 
@@ -355,38 +228,45 @@ async function openLlamaSidebar(): Promise<boolean> {
  *
  * @param context - The extension context provided by VS Code.
  */
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
 	// Build a descriptive User-Agent to help quantify API usage
 	const ext = vscode.extensions.getExtension(EXTENSION_ID);
 	const extVersion = ext?.packageJSON?.version ?? "unknown";
 	const vscodeVersion = vscode.version;
 	// Keep UA minimal: only extension version and VS Code version
-	const ua = `llama-vscode-chat/${extVersion} VSCode/${vscodeVersion}`;
+	const ua = `${EXTENSION_NAME}/${extVersion} VSCode/${vscodeVersion}`;
 	const logService = new LlamaLogService(context);
+	const memoryService = new SharedMemoryService(context.globalStorageUri.fsPath);
 	context.subscriptions.push(logService);
-	void logService.initialize();
+	await Promise.all([logService.initialize(), memoryService.initialize()]);
+	registerMemoryTools(context, memoryService);
 
 	// Llama.cpp Provider
-	const llamaProvider = new LlamaCppChatModelProvider(context.secrets, ua, logService);
-	context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider("llamacpp", llamaProvider));
+	const llamaProvider = new LlamaCppChatModelProvider(context.secrets, ua, logService, memoryService);
+	context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider(PROVIDER_VENDOR, llamaProvider));
 	let lastThroughput: string | undefined;
 	let lastContextUsage: ContextUsageDisplay | undefined;
-	const quickActionsProvider = new LlamaQuickActionsProvider(() => lastThroughput, () => lastContextUsage);
+	const quickActionsProvider = new LlamaQuickActionsProvider(
+		() => lastThroughput,
+		() => lastContextUsage,
+		() => memoryService.count
+	);
 	context.subscriptions.push(vscode.window.registerTreeDataProvider("llamacpp-quick-actions", quickActionsProvider));
+	context.subscriptions.push(memoryService.onDidChange(() => quickActionsProvider.refresh()));
 	llamaProvider.refreshLanguageModelChatInformation();
 
 	const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 95);
-	performanceStatusBar.name = "Llama.cpp Throughput";
+	performanceStatusBar.name = "Local LLM Throughput";
 	performanceStatusBar.command = "llamacpp.openLatestLog";
-	performanceStatusBar.text = "$(dashboard) llama.cpp TPS: n/a";
+	performanceStatusBar.text = "$(dashboard) local LLM TPS: n/a";
 
 	const contextUsageStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 94);
-	contextUsageStatusBar.name = "Llama.cpp Context Usage";
+	contextUsageStatusBar.name = "Local LLM Context Usage";
 	contextUsageStatusBar.command = "llamacpp.openLatestLog";
-	contextUsageStatusBar.text = "$(pie-chart) llama.cpp ctx: n/a";
+	contextUsageStatusBar.text = "$(pie-chart) local LLM ctx: n/a";
 
 	const updatePerformanceStatusBarVisibility = (): void => {
-		const enabled = vscode.workspace.getConfiguration("llamacpp").get<boolean>("showPerformanceStatusBar", true) !== false;
+		const enabled = vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>("showPerformanceStatusBar", true) !== false;
 		if (enabled) {
 			performanceStatusBar.show();
 		} else {
@@ -395,7 +275,7 @@ export function activate(context: vscode.ExtensionContext) {
 	};
 
 	const updateContextUsageStatusBarVisibility = (): void => {
-		const enabled = vscode.workspace.getConfiguration("llamacpp").get<boolean>("showContextUsageStatusBar", true) !== false;
+		const enabled = vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>("showContextUsageStatusBar", true) !== false;
 		if (enabled) {
 			contextUsageStatusBar.show();
 		} else {
@@ -436,7 +316,7 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 
 			lastThroughput = tpsText;
-			performanceStatusBar.text = `$(dashboard) llama.cpp ${tpsText}`;
+			performanceStatusBar.text = `$(dashboard) local LLM ${tpsText}`;
 			performanceStatusBar.tooltip = performanceTooltipLines.join("\n");
 			quickActionsProvider.refresh();
 		})
@@ -446,19 +326,19 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand("llamacpp.openSidebar", async () => {
 			const opened = await openLlamaSidebar();
 			if (!opened) {
-				vscode.window.showWarningMessage("Unable to open Llama.cpp sidebar automatically. Use View: Open View...");
+				vscode.window.showWarningMessage("Unable to open the Local LLM sidebar automatically. Use View: Open View...");
 			}
 		})
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.manage", async () => {
-			const config = vscode.workspace.getConfiguration("llamacpp");
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
 			const configuredUrl = getExplicitConfiguredServerUrl(config);
 			const existingUrl = configuredUrl || (await context.secrets.get("llamacpp.serverUrl"));
 			const serverUrl = await vscode.window.showInputBox({
-				title: "Llama.cpp Server URL",
-				prompt: "Enter the URL of your Llama.cpp server",
+				title: "Primary OpenAI-Compatible Server URL",
+				prompt: "Enter the URL of the primary model server",
 				value: existingUrl || DEFAULT_SERVER_URL,
 				ignoreFocusOut: true,
 			});
@@ -477,7 +357,56 @@ export function activate(context: vscode.ExtensionContext) {
 
 			llamaProvider.refreshLanguageModelChatInformation();
 			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage("Llama.cpp configuration saved.");
+			vscode.window.showInformationMessage("Primary model server configuration saved.");
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.setLocalServerUrl", async () => {
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+			const current = String(config.get("localServerUrl", DEFAULT_SERVER_URL) || DEFAULT_SERVER_URL);
+			const serverUrl = await vscode.window.showInputBox({
+				title: "Local LLM Server URL",
+				prompt: "Enter the URL of your local OpenAI-compatible server",
+				value: current,
+				ignoreFocusOut: true,
+			});
+
+			if (serverUrl === undefined) {
+				return;
+			}
+
+			const trimmed = serverUrl.trim() || DEFAULT_SERVER_URL;
+			await config.update("localServerUrl", trimmed, vscode.ConfigurationTarget.Global);
+			await config.update("enableLocalServer", true, vscode.ConfigurationTarget.Global);
+
+			llamaProvider.refreshLanguageModelChatInformation();
+			quickActionsProvider.refresh();
+			vscode.window.showInformationMessage(`Local LLM source enabled: ${trimmed}`);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.toggleLocalServer", async () => {
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+			const next = config.get<boolean>("enableLocalServer", true) === false;
+			await config.update("enableLocalServer", next, vscode.ConfigurationTarget.Global);
+
+			llamaProvider.refreshLanguageModelChatInformation();
+			quickActionsProvider.refresh();
+			vscode.window.showInformationMessage(`Local LLM source ${next ? "enabled" : "disabled"}.`);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.toggleDeepSeek", async () => {
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+			const next = config.get<boolean>("enableDeepSeek", true) === false;
+			await config.update("enableDeepSeek", next, vscode.ConfigurationTarget.Global);
+
+			llamaProvider.refreshLanguageModelChatInformation();
+			quickActionsProvider.refresh();
+			vscode.window.showInformationMessage(`DeepSeek source ${next ? "enabled" : "disabled"}.`);
 		})
 	);
 
@@ -485,7 +414,7 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand("llamacpp.setApiKey", async () => {
 			const existingApiKey = await context.secrets.get("llamacpp.apiKey");
 			const apiKey = await vscode.window.showInputBox({
-				title: "Llama.cpp / OpenAI-Compatible API Key",
+				title: "Primary OpenAI-Compatible API Key",
 				prompt: "Enter API key (leave empty to clear)",
 				password: true,
 				ignoreFocusOut: true,
@@ -498,10 +427,10 @@ export function activate(context: vscode.ExtensionContext) {
 
 			if (apiKey.trim().length > 0) {
 				await context.secrets.store("llamacpp.apiKey", apiKey.trim());
-				vscode.window.showInformationMessage("Llama.cpp API key saved to Secret Storage.");
+				vscode.window.showInformationMessage("Primary server API key saved to Secret Storage.");
 			} else {
 				await context.secrets.delete("llamacpp.apiKey");
-				vscode.window.showInformationMessage("Llama.cpp API key cleared.");
+				vscode.window.showInformationMessage("Primary server API key cleared.");
 			}
 
 			llamaProvider.refreshLanguageModelChatInformation();
@@ -511,22 +440,22 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.configureDeepSeek", async () => {
-			const config = vscode.workspace.getConfiguration("llamacpp");
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+			const existingApiKey = await context.secrets.get("llamacpp.deepSeekApiKey");
 			const apiKey = await vscode.window.showInputBox({
 				title: "DeepSeek API Key",
 				prompt: "Enter DeepSeek API key (saved in VS Code Secret Storage)",
 				password: true,
 				ignoreFocusOut: true,
 				placeHolder: "sk-...",
+				value: existingApiKey ?? "",
 			});
 
 			if (apiKey === undefined) {
 				return;
 			}
 
-			await config.update("serverUrl", DEEPSEEK_SERVER_URL, vscode.ConfigurationTarget.Global);
-			await config.update("modelFamily", "deepseek", vscode.ConfigurationTarget.Global);
-			await config.update("contextLength", DEEPSEEK_CONTEXT_LENGTH, vscode.ConfigurationTarget.Global);
+			await config.update("enableDeepSeek", true, vscode.ConfigurationTarget.Global);
 			await config.update("maxOutputTokensCap", DEEPSEEK_MAX_OUTPUT_TOKENS, vscode.ConfigurationTarget.Global);
 			await config.update("thinkingMode", "deep", vscode.ConfigurationTarget.Global);
 			await config.update("toolCallingMode", "apiDirect", vscode.ConfigurationTarget.Global);
@@ -540,7 +469,7 @@ export function activate(context: vscode.ExtensionContext) {
 			await config.update("requestQueueTimeoutMs", 1200000, vscode.ConfigurationTarget.Global);
 
 			if (apiKey.trim().length > 0) {
-				await context.secrets.store("llamacpp.apiKey", apiKey.trim());
+				await context.secrets.store("llamacpp.deepSeekApiKey", apiKey.trim());
 
 				try {
 					const controller = new AbortController();
@@ -571,11 +500,13 @@ export function activate(context: vscode.ExtensionContext) {
 					const message = error instanceof Error ? error.message : String(error);
 					vscode.window.showWarningMessage(`DeepSeek key saved, but model check failed: ${message}`);
 				}
+			} else {
+				await context.secrets.delete("llamacpp.deepSeekApiKey");
 			}
 
 			llamaProvider.refreshLanguageModelChatInformation();
 			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage("DeepSeek configured for max V4 Pro profile. Open model picker and select deepseek-v4-pro.");
+			vscode.window.showInformationMessage("DeepSeek source enabled alongside local models. Open model picker and select a DeepSeek model.");
 		})
 	);
 
@@ -586,8 +517,45 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.openMemory", async () => {
+			const document = await vscode.workspace.openTextDocument(vscode.Uri.file(memoryService.filePath));
+			await vscode.window.showTextDocument(document, { preview: false });
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.clearMemory", async () => {
+			const confirmed = await vscode.window.showWarningMessage(
+				`Delete all ${memoryService.count} shared memory entries?`,
+				{ modal: true },
+				"Delete All"
+			);
+			if (confirmed !== "Delete All") {
+				return;
+			}
+			await memoryService.clear();
+			vscode.window.showInformationMessage("Shared memory cleared.");
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.workspace.onDidSaveTextDocument(async document => {
+			if (document.uri.fsPath !== memoryService.filePath) {
+				return;
+			}
+			try {
+				await memoryService.reload();
+				vscode.window.showInformationMessage(`Shared memory reloaded (${memoryService.count} entries).`);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				vscode.window.showErrorMessage(`Unable to reload shared memory: ${message}`);
+			}
+		})
+	);
+
+	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.setThinkingMode", async () => {
-			const config = vscode.workspace.getConfiguration("llamacpp");
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
 			const current = (String(config.get("thinkingMode", "auto")) as ThinkingMode) ?? "auto";
 			const next = await pickThinkingMode(current);
 			if (!next) {
@@ -596,17 +564,17 @@ export function activate(context: vscode.ExtensionContext) {
 
 			await config.update("thinkingMode", next, vscode.ConfigurationTarget.Global);
 			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage(`Llama.cpp thinking mode: ${next}`);
+			vscode.window.showInformationMessage(`Local LLM thinking mode: ${next}`);
 		})
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.setReasoningBudget", async () => {
-			const config = vscode.workspace.getConfiguration("llamacpp");
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
 			const current = Number(config.get("reasoningBudget", 2048));
 
 			const value = await vscode.window.showInputBox({
-				title: "Llama.cpp Reasoning Budget",
+				title: "Local LLM Reasoning Budget",
 				prompt: "Set reasoning budget in tokens (0 disables thinking budget)",
 				value: Number.isFinite(current) ? String(current) : "2048",
 				ignoreFocusOut: true,
@@ -629,13 +597,13 @@ export function activate(context: vscode.ExtensionContext) {
 			const parsed = Math.max(0, Math.min(65536, Number(value)));
 			await config.update("reasoningBudget", parsed, vscode.ConfigurationTarget.Global);
 			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage(`Llama.cpp reasoning budget: ${parsed}`);
+			vscode.window.showInformationMessage(`Local LLM reasoning budget: ${parsed}`);
 		})
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.setToolResultMode", async () => {
-			const config = vscode.workspace.getConfiguration("llamacpp");
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
 			const current = (String(config.get("toolResultMode", "auto")) as ToolResultMode) ?? "auto";
 			const next = await pickToolResultMode(current);
 			if (!next) {
@@ -644,13 +612,13 @@ export function activate(context: vscode.ExtensionContext) {
 
 			await config.update("toolResultMode", next, vscode.ConfigurationTarget.Global);
 			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage(`Llama.cpp tool result mode: ${next}`);
+			vscode.window.showInformationMessage(`Local LLM tool result mode: ${next}`);
 		})
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.setToolCallingMode", async () => {
-			const config = vscode.workspace.getConfiguration("llamacpp");
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
 			const current = (String(config.get("toolCallingMode", "classic")) as ToolCallingMode) ?? "classic";
 			const next = await pickToolCallingMode(current);
 			if (!next) {
@@ -659,7 +627,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 			await config.update("toolCallingMode", next, vscode.ConfigurationTarget.Global);
 			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage(`Llama.cpp tool calling mode: ${next}`);
+			vscode.window.showInformationMessage(`Local LLM tool calling mode: ${next}`);
 		})
 	);
 
@@ -667,7 +635,7 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand("llamacpp.refreshModels", async () => {
 			llamaProvider.refreshLanguageModelChatInformation();
 			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage("Llama.cpp models refreshed.");
+			vscode.window.showInformationMessage("Local LLM models refreshed.");
 		})
 	);
 
@@ -724,47 +692,47 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.toggleFileLogging", async () => {
-			const config = vscode.workspace.getConfiguration("llamacpp");
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
 			const current = config.get<boolean>("enableFileLogging", true) !== false;
 			const next = !current;
 			await config.update("enableFileLogging", next, vscode.ConfigurationTarget.Global);
 			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage(`Llama.cpp file logging: ${next ? "on" : "off"}`);
+			vscode.window.showInformationMessage(`Local LLM file logging: ${next ? "on" : "off"}`);
 		})
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.toggleStreamChunkLogging", async () => {
-			const config = vscode.workspace.getConfiguration("llamacpp");
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
 			const current = config.get<boolean>("logStreamChunks", false) === true;
 			const next = !current;
 			await config.update("logStreamChunks", next, vscode.ConfigurationTarget.Global);
 			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage(`Llama.cpp stream chunk logging: ${next ? "on" : "off"}`);
+			vscode.window.showInformationMessage(`Local LLM stream chunk logging: ${next ? "on" : "off"}`);
 		})
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.togglePerformanceStatusBar", async () => {
-			const config = vscode.workspace.getConfiguration("llamacpp");
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
 			const current = config.get<boolean>("showPerformanceStatusBar", true) !== false;
 			const next = !current;
 			await config.update("showPerformanceStatusBar", next, vscode.ConfigurationTarget.Global);
 			updatePerformanceStatusBarVisibility();
 			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage(`Llama.cpp performance status bar: ${next ? "on" : "off"}`);
+			vscode.window.showInformationMessage(`Local LLM performance status bar: ${next ? "on" : "off"}`);
 		})
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.toggleContextUsageStatusBar", async () => {
-			const config = vscode.workspace.getConfiguration("llamacpp");
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
 			const current = config.get<boolean>("showContextUsageStatusBar", true) !== false;
 			const next = !current;
 			await config.update("showContextUsageStatusBar", next, vscode.ConfigurationTarget.Global);
 			updateContextUsageStatusBarVisibility();
 			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage(`Llama.cpp context usage status bar: ${next ? "on" : "off"}`);
+			vscode.window.showInformationMessage(`Local LLM context usage status bar: ${next ? "on" : "off"}`);
 		})
 	);
 
@@ -779,6 +747,10 @@ export function activate(context: vscode.ExtensionContext) {
 				}
 				if (
 					event.affectsConfiguration("llamacpp.serverUrl") ||
+					event.affectsConfiguration("llamacpp.enableLocalServer") ||
+					event.affectsConfiguration("llamacpp.localServerUrl") ||
+					event.affectsConfiguration("llamacpp.localContextLength") ||
+					event.affectsConfiguration("llamacpp.enableDeepSeek") ||
 					event.affectsConfiguration("llamacpp.contextLength") ||
 					event.affectsConfiguration("llamacpp.maxOutputTokensCap") ||
 					event.affectsConfiguration("llamacpp.maxToolsPerRequest") ||

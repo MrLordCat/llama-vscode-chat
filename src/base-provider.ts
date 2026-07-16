@@ -11,6 +11,7 @@ import {
     Progress,
 } from "vscode";
 import { tryParseJSONObject } from "./utils";
+import { normalizeChatTokenUsage, type ChatTokenUsage } from "./context/usage";
 
 export const DEFAULT_MAX_OUTPUT_TOKENS = 131072;
 export const DEFAULT_CONTEXT_LENGTH = 65536;
@@ -261,13 +262,13 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
      * @param responseBody - The readable stream from the API response.
      * @param progress - Progress callback to report response parts.
      * @param token - Cancellation token to abort processing.
-     * @returns Promise that resolves when streaming is complete.
+     * @returns Token usage reported by the server, when available.
      */
     protected async processStreamingResponse(
         responseBody: ReadableStream<Uint8Array>,
         progress: vscode.Progress<vscode.LanguageModelResponsePart>,
         token: vscode.CancellationToken
-    ): Promise<void> {
+    ): Promise<ChatTokenUsage | undefined> {
         this._toolCallBuffers.clear();
         this._completedToolCallIndices.clear();
         this._hasEmittedAssistantText = false;
@@ -285,6 +286,7 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
         const decoder = new TextDecoder();
         const coalescedProgress = this.createTextCoalescingProgress(progress);
         let buffer = "";
+        let latestUsage: ChatTokenUsage | undefined;
 
         try {
             while (!token.isCancellationRequested) {
@@ -298,7 +300,7 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
                 buffer = lines.pop() || "";
 
                 for (const line of lines) {
-                    await this.processSseLine(line, coalescedProgress.progress);
+                    latestUsage = (await this.processSseLine(line, coalescedProgress.progress)) ?? latestUsage;
                 }
             }
 
@@ -309,7 +311,7 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
                     if (!trimmedLine) {
                         continue;
                     }
-                    await this.processSseLine(trimmedLine, coalescedProgress.progress);
+                    latestUsage = (await this.processSseLine(trimmedLine, coalescedProgress.progress)) ?? latestUsage;
                 }
             }
 
@@ -333,6 +335,8 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
             this._insideThinkingTag = false;
             this._thinkingFallbackHeaderEmitted = false;
         }
+
+        return latestUsage;
     }
 
     private createTextCoalescingProgress(
@@ -392,9 +396,9 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
     private async processSseLine(
         line: string,
         progress: vscode.Progress<vscode.LanguageModelResponsePart>
-    ): Promise<void> {
+    ): Promise<ChatTokenUsage | undefined> {
         if (!line.startsWith("data: ")) {
-            return;
+            return undefined;
         }
 
         const data = line.slice(6);
@@ -404,14 +408,17 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
             // Flush any in-progress text-embedded tool call (silent if incomplete)
             await this.flushActiveTextToolCall(progress);
             this.flushThinkingBuffers(progress);
-            return;
+            return undefined;
         }
 
         try {
-            const parsed = JSON.parse(data);
+            const parsed = JSON.parse(data) as Record<string, unknown>;
+            const usage = normalizeChatTokenUsage(parsed.usage);
             await this.processDelta(parsed, progress);
+            return usage;
         } catch {
             // Silently ignore malformed SSE lines temporarily
+            return undefined;
         }
     }
 

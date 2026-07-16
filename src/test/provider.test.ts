@@ -37,9 +37,321 @@ suite("Llama.cpp Chat Provider Extension", () => {
             assert.ok(Array.isArray(infos));
         });
 
+		test("keeps primary and DeepSeek API keys separate", async () => {
+			const isolatedSecrets = new MockSecretStorage();
+			await isolatedSecrets.store("llamacpp.apiKey", "primary-key");
+			await isolatedSecrets.store("llamacpp.deepSeekApiKey", "deepseek-key");
+			const isolatedProvider = new LlamaCppChatModelProvider(isolatedSecrets, "test-user-agent");
+			const providerAny = isolatedProvider as unknown as {
+				getModelSources: () => Promise<Array<{ key: string; apiKey?: string }>>;
+			};
+
+			const sources = await providerAny.getModelSources();
+			assert.strictEqual(sources.find(source => source.key === "primary")?.apiKey, "primary-key");
+			assert.strictEqual(sources.find(source => source.key === "deepseek")?.apiKey, "deepseek-key");
+		});
+
+        test("discovers local and DeepSeek models as separate sources", async () => {
+            const providerAny = provider as unknown as {
+                getModelSources: () => Promise<Array<{
+                    key: string;
+                    label: string;
+                    serverUrl: string;
+                    apiKey?: string;
+                    familyOverride?: string;
+                    contextLengthOverride?: number;
+                    contextLengthFallback?: number;
+                }>>;
+                getRuntimeContextLengthWithCache: () => Promise<number | undefined>;
+                fetchModelsWithInflightCache: (
+                    serverUrl: string,
+                    apiKey: string | undefined,
+                    apiKeyPresent: boolean
+                ) => Promise<Array<{ id: string }>>;
+            };
+            const originalGetModelSources = providerAny.getModelSources;
+            const originalGetRuntimeContextLengthWithCache = providerAny.getRuntimeContextLengthWithCache;
+            const originalFetchModelsWithInflightCache = providerAny.fetchModelsWithInflightCache;
+
+            try {
+                provider.refreshLanguageModelChatInformation();
+                providerAny.getModelSources = async () => [
+                    {
+                        key: "local",
+                        label: "Local",
+                        serverUrl: "http://localhost:8000",
+                        familyOverride: "auto",
+                        contextLengthFallback: 65536,
+                    },
+                    {
+                        key: "deepseek",
+                        label: "DeepSeek",
+                        serverUrl: "https://api.deepseek.com",
+                        apiKey: "sk-test",
+                        familyOverride: "deepseek",
+                        contextLengthOverride: 1048576,
+                    },
+                ];
+                providerAny.getRuntimeContextLengthWithCache = async () => undefined;
+                providerAny.fetchModelsWithInflightCache = async serverUrl =>
+                    serverUrl.includes("deepseek")
+                        ? [{ id: "deepseek-v4-pro" }]
+                        : [{ id: "qwen3-local" }];
+
+                const infos = await provider.provideLanguageModelChatInformation(
+                    { silent: true },
+                    new vscode.CancellationTokenSource().token
+                );
+
+                const ids = infos.map(info => info.id).sort();
+                assert.deepStrictEqual(ids, ["deepseek::deepseek-v4-pro", "local::qwen3-local"]);
+                assert.ok(infos.some(info => info.name.includes("(Local)")));
+                assert.ok(infos.some(info => info.name.includes("(DeepSeek)")));
+
+                const deepSeekInfo = infos.find(info => info.id === "deepseek::deepseek-v4-pro");
+                assert.ok(deepSeekInfo);
+                assert.strictEqual(deepSeekInfo!.maxOutputTokens, 393216);
+            } finally {
+                providerAny.getModelSources = originalGetModelSources;
+                providerAny.getRuntimeContextLengthWithCache = originalGetRuntimeContextLengthWithCache;
+                providerAny.fetchModelsWithInflightCache = originalFetchModelsWithInflightCache;
+            }
+        });
+
+        test("advertises llama.cpp vision from models capabilities and props modalities", async () => {
+            const providerAny = provider as unknown as {
+                getModelSources: () => Promise<Array<{
+                    key: string;
+                    label: string;
+                    serverUrl: string;
+                    familyOverride?: string;
+                    contextLengthFallback?: number;
+                }>>;
+                getRuntimeContextLengthWithCache: () => Promise<number | undefined>;
+            };
+            const originalGetModelSources = providerAny.getModelSources;
+            const originalGetRuntimeContextLengthWithCache = providerAny.getRuntimeContextLengthWithCache;
+            const originalFetch = globalThis.fetch;
+
+            try {
+                provider.refreshLanguageModelChatInformation();
+                providerAny.getModelSources = async () => [{
+                    key: "local",
+                    label: "Local",
+                    serverUrl: "http://localhost:8000",
+                    familyOverride: "auto",
+                    contextLengthFallback: 65536,
+                }];
+                providerAny.getRuntimeContextLengthWithCache = async () => 262144;
+                globalThis.fetch = (async (input: string | URL | Request) => {
+                    const url = String(input);
+                    if (url.endsWith("/props")) {
+                        return new Response(JSON.stringify({
+                            modalities: { vision: true, audio: false },
+                        }), { status: 200, headers: { "content-type": "application/json" } });
+                    }
+                    if (url.endsWith("/v1/models")) {
+                        return new Response(JSON.stringify({
+                            models: [{
+                                model: "Qwen3.6-27B-Q3_K_S_mtp.gguf",
+                                capabilities: ["completion", "multimodal"],
+                            }],
+                            data: [{
+                                id: "Qwen3.6-27B-Q3_K_S_mtp.gguf",
+                                meta: { n_ctx_train: 262144 },
+                            }],
+                        }), { status: 200, headers: { "content-type": "application/json" } });
+                    }
+                    throw new Error(`unexpected fetch: ${url}`);
+                }) as typeof fetch;
+
+                const infos = await provider.provideLanguageModelChatInformation(
+                    { silent: true },
+                    new vscode.CancellationTokenSource().token
+                );
+
+                assert.strictEqual(infos.length, 1);
+                assert.strictEqual(infos[0].id, "local::Qwen3.6-27B-Q3_K_S_mtp.gguf");
+                assert.strictEqual(infos[0].capabilities.imageInput, true);
+            } finally {
+                providerAny.getModelSources = originalGetModelSources;
+                providerAny.getRuntimeContextLengthWithCache = originalGetRuntimeContextLengthWithCache;
+                globalThis.fetch = originalFetch;
+                provider.refreshLanguageModelChatInformation();
+            }
+        });
+
+        test("uses local runtime context before local fallback context", async () => {
+            const providerAny = provider as unknown as {
+                getModelSources: () => Promise<Array<{
+                    key: string;
+                    label: string;
+                    serverUrl: string;
+                    apiKey?: string;
+                    familyOverride?: string;
+                    contextLengthOverride?: number;
+                    contextLengthFallback?: number;
+                }>>;
+                getRuntimeContextLengthWithCache: () => Promise<number | undefined>;
+                fetchModelsWithInflightCache: () => Promise<Array<{ id: string }>>;
+            };
+            const originalGetModelSources = providerAny.getModelSources;
+            const originalGetRuntimeContextLengthWithCache = providerAny.getRuntimeContextLengthWithCache;
+            const originalFetchModelsWithInflightCache = providerAny.fetchModelsWithInflightCache;
+
+            try {
+                provider.refreshLanguageModelChatInformation();
+                providerAny.getModelSources = async () => [
+                    {
+                        key: "local",
+                        label: "Local",
+                        serverUrl: "http://localhost:8000",
+                        familyOverride: "auto",
+                        contextLengthFallback: 65536,
+                    },
+                ];
+                providerAny.getRuntimeContextLengthWithCache = async () => 131072;
+                providerAny.fetchModelsWithInflightCache = async () => [{ id: "qwen3-local" }];
+
+                const infos = await provider.provideLanguageModelChatInformation(
+                    { silent: true },
+                    new vscode.CancellationTokenSource().token
+                );
+
+                assert.strictEqual(infos.length, 1);
+                assert.strictEqual(infos[0].maxInputTokens + infos[0].maxOutputTokens, 131072);
+                assert.ok(infos[0].maxInputTokens > 90000);
+                assert.ok(infos[0].maxOutputTokens <= 32768);
+                assert.ok(String(infos[0].tooltip).includes("Context: 131072 tokens"));
+            } finally {
+                providerAny.getModelSources = originalGetModelSources;
+                providerAny.getRuntimeContextLengthWithCache = originalGetRuntimeContextLengthWithCache;
+                providerAny.fetchModelsWithInflightCache = originalFetchModelsWithInflightCache;
+            }
+        });
+
+        test("routes prefixed local model requests to the local server", async () => {
+            const providerAny = provider as unknown as {
+                getModelSources: () => Promise<Array<{
+                    key: string;
+                    label: string;
+                    serverUrl: string;
+                    apiKey?: string;
+                    familyOverride?: string;
+                    contextLengthOverride?: number;
+                    contextLengthFallback?: number;
+                }>>;
+                getRuntimeContextLengthWithCache: () => Promise<number | undefined>;
+                acquireChatRequestSlot: (
+                    requestId: string,
+                    queueTimeoutMs: number,
+                    token: vscode.CancellationToken
+                ) => Promise<{ release: () => void; waitMs: number }>;
+                sendChatCompletion: (
+                    serverUrl: string,
+                    headers: Record<string, string>,
+                    requestBody: Record<string, unknown>,
+                    timeoutMs: number,
+                    token: vscode.CancellationToken
+                ) => Promise<Response>;
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<void>;
+            };
+            const originalGetModelSources = providerAny.getModelSources;
+            const originalGetRuntimeContextLengthWithCache = providerAny.getRuntimeContextLengthWithCache;
+            const originalAcquireChatRequestSlot = providerAny.acquireChatRequestSlot;
+            const originalSendChatCompletion = providerAny.sendChatCompletion;
+            const originalProcessStreamingResponse = providerAny.processStreamingResponse;
+            const sent: Array<{ serverUrl: string; requestBody: Record<string, unknown> }> = [];
+            const reportedParts: vscode.LanguageModelResponsePart[] = [];
+
+            try {
+                providerAny.getModelSources = async () => [
+                    {
+                        key: "local",
+                        label: "Local",
+                        serverUrl: "http://localhost:8000",
+                        familyOverride: "auto",
+                        contextLengthFallback: 65536,
+                    },
+                    {
+                        key: "deepseek",
+                        label: "DeepSeek",
+                        serverUrl: "https://api.deepseek.com",
+                        apiKey: "sk-test",
+                        familyOverride: "deepseek",
+                        contextLengthOverride: 1048576,
+                    },
+                ];
+                providerAny.getRuntimeContextLengthWithCache = async () => 65536;
+                providerAny.acquireChatRequestSlot = async () => ({ release: () => undefined, waitMs: 0 });
+                providerAny.sendChatCompletion = async (serverUrl, _headers, requestBody) => {
+                    sent.push({
+                        serverUrl,
+                        requestBody: JSON.parse(JSON.stringify(requestBody)) as Record<string, unknown>,
+                    });
+                    return new Response(
+                        new ReadableStream<Uint8Array>({
+                            start(controller) {
+                                controller.close();
+                            },
+                        }),
+                        { status: 200 }
+                    );
+                };
+                providerAny.processStreamingResponse = async (_responseBody, progress) => {
+                    progress.report(new vscode.LanguageModelTextPart("local answer"));
+                };
+
+                await provider.provideLanguageModelChatResponse(
+                    {
+                        id: "local::qwen3-local",
+                        name: "qwen3-local (Local)",
+                        family: "qwen",
+                        version: "1",
+                        maxInputTokens: 60000,
+                        maxOutputTokens: 4096,
+                        capabilities: {},
+                    } as unknown as vscode.LanguageModelChatInformation,
+                    [vscode.LanguageModelChatMessage.User("hello")],
+                    {
+                        modelOptions: {},
+                        tools: [],
+                        toolMode: vscode.LanguageModelChatToolMode.Auto,
+                    },
+                    { report: part => reportedParts.push(part) },
+                    new vscode.CancellationTokenSource().token
+                );
+            } finally {
+                providerAny.getModelSources = originalGetModelSources;
+                providerAny.getRuntimeContextLengthWithCache = originalGetRuntimeContextLengthWithCache;
+                providerAny.acquireChatRequestSlot = originalAcquireChatRequestSlot;
+                providerAny.sendChatCompletion = originalSendChatCompletion;
+                providerAny.processStreamingResponse = originalProcessStreamingResponse;
+            }
+
+            assert.strictEqual(sent.length, 1);
+            assert.strictEqual(sent[0].serverUrl, "http://localhost:8000");
+            assert.strictEqual(sent[0].requestBody.model, "qwen3-local");
+            assert.deepStrictEqual(sent[0].requestBody.stream_options, { include_usage: true });
+
+            const usagePart = reportedParts.find(
+                (part): part is vscode.LanguageModelDataPart =>
+                    part instanceof vscode.LanguageModelDataPart && part.mimeType === "usage"
+            );
+            assert.ok(usagePart, "expected native usage response data");
+            const usage = JSON.parse(new TextDecoder().decode(usagePart.data)) as Record<string, number>;
+            assert.ok(usage.prompt_tokens > 0);
+            assert.ok(usage.completion_tokens > 0);
+            assert.strictEqual(usage.total_tokens, usage.prompt_tokens + usage.completion_tokens);
+        });
+
         test("provideTokenCount calculation for text", async () => {
             const count = await provider.provideTokenCount(
-                {} as any,
+                {} as vscode.LanguageModelChatInformation,
                 "hello world",
                 new vscode.CancellationTokenSource().token
             );
@@ -58,7 +370,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
             } as unknown as vscode.LanguageModelChatRequestMessage;
 
             const count = await provider.provideTokenCount(
-                {} as any,
+                {} as vscode.LanguageModelChatInformation,
                 message,
                 new vscode.CancellationTokenSource().token
             );
@@ -235,6 +547,46 @@ suite("Llama.cpp Chat Provider Extension", () => {
 
             assert.ok(text.includes("done"));
             assert.ok(hasThinkingPart || hasNonTextPart || text.includes("step 1 -> step 2"));
+        });
+
+        test("returns exact usage from the final SSE usage chunk", async () => {
+            const providerAny = provider as unknown as {
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<{
+                    prompt_tokens: number;
+                    completion_tokens: number;
+                    total_tokens: number;
+                    prompt_tokens_details?: { cached_tokens?: number };
+                } | undefined>;
+            };
+
+            const encoder = new TextEncoder();
+            const payload =
+                "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}],\"usage\":null}\n\n" +
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":30,\"total_tokens\":150,\"prompt_tokens_details\":{\"cached_tokens\":80}}}\n\n" +
+                "data: [DONE]\n\n";
+            const stream = new ReadableStream<Uint8Array>({
+                start(controller) {
+                    controller.enqueue(encoder.encode(payload));
+                    controller.close();
+                },
+            });
+
+            const usage = await providerAny.processStreamingResponse(
+                stream,
+                { report: () => undefined },
+                new vscode.CancellationTokenSource().token
+            );
+
+            assert.deepStrictEqual(usage, {
+                prompt_tokens: 120,
+                completion_tokens: 30,
+                total_tokens: 150,
+                prompt_tokens_details: { cached_tokens: 80 },
+            });
         });
 
         test("coalesces many small text deltas before reporting progress", async () => {
@@ -523,7 +875,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
                     name: undefined,
                 },
             ];
-            const out: any[] = convertMessages(messages);
+            const out = convertMessages(messages);
             assert.deepEqual(out, [
                 { role: "user", content: "hi" },
                 { role: "assistant", content: "hello" },
@@ -543,12 +895,12 @@ suite("Llama.cpp Chat Provider Extension", () => {
                     name: undefined,
                 },
             ];
-            const out: any[] = convertMessages(messages);
+            const out = convertMessages(messages);
             // Expectation: merged into one message
             assert.strictEqual(out.length, 1);
             assert.strictEqual(out[0].role, "user");
-            assert.ok(out[0].content.includes("context"));
-            assert.ok(out[0].content.includes("query"));
+            assert.ok(String(out[0].content).includes("context"));
+            assert.ok(String(out[0].content).includes("query"));
         });
 
         test("merges consecutive assistant messages (text + tool call)", () => {
@@ -564,7 +916,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
                     name: undefined,
                 },
             ];
-            const out: any[] = convertMessages(messages);
+            const out = convertMessages(messages);
             assert.strictEqual(out.length, 1);
             assert.strictEqual(out[0].role, "assistant");
             assert.strictEqual(out[0].content, "thinking...");
@@ -586,12 +938,12 @@ suite("Llama.cpp Chat Provider Extension", () => {
                     name: undefined,
                 },
             ];
-            const out: any[] = convertMessages(messages);
+            const out = convertMessages(messages);
             // Expectation: merged into single User message with combined text
             assert.strictEqual(out.length, 1);
             assert.strictEqual(out[0].role, "user");
-            assert.ok(out[0].content.includes("res1"));
-            assert.ok(out[0].content.includes("res2"));
+            assert.ok(String(out[0].content).includes("res1"));
+            assert.ok(String(out[0].content).includes("res2"));
         });
         test("merges user (text) into tool message", () => {
             const messages: vscode.LanguageModelChatMessage[] = [
@@ -606,11 +958,11 @@ suite("Llama.cpp Chat Provider Extension", () => {
                    name: undefined,
                },
            ];
-           const out: any[] = convertMessages(messages);
+           const out = convertMessages(messages);
            assert.strictEqual(out.length, 1);
            assert.strictEqual(out[0].role, "user");
-           assert.ok(out[0].content.includes("context"));
-           assert.ok(out[0].content.includes("res1"));
+           assert.ok(String(out[0].content).includes("context"));
+           assert.ok(String(out[0].content).includes("res1"));
        });
 
        test("merges tool message and user (text)", () => {
@@ -626,11 +978,11 @@ suite("Llama.cpp Chat Provider Extension", () => {
                   name: undefined,
               },
           ];
-          const out: any[] = convertMessages(messages);
+          const out = convertMessages(messages);
           assert.strictEqual(out.length, 1);
           assert.strictEqual(out[0].role, "user");
-          assert.ok(out[0].content.includes("res1"));
-          assert.ok(out[0].content.includes("followup"));
+          assert.ok(String(out[0].content).includes("res1"));
+          assert.ok(String(out[0].content).includes("followup"));
       });
 
           test("keeps tool role when toolResultMode is tool", () => {
@@ -648,7 +1000,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
                 },
             ];
 
-            const out: any[] = convertMessages(messages, { toolResultMode: "tool" });
+            const out = convertMessages(messages, { toolResultMode: "tool" });
             assert.strictEqual(out.length, 2);
             assert.strictEqual(out[0].role, "assistant");
             assert.strictEqual(out[1].role, "tool");
@@ -673,48 +1025,32 @@ suite("Llama.cpp Chat Provider Extension", () => {
                 },
             ];
 
-            const out: any[] = convertMessages(messages, { toolResultMode: "tool" });
+            const out = convertMessages(messages, { toolResultMode: "tool" });
             assert.strictEqual(out.length, 1);
             assert.strictEqual(out[0].role, "assistant");
             assert.strictEqual(out[0].content, "");
             assert.strictEqual(out[0].reasoning_content, "need a file read before answering");
-            assert.strictEqual(out[0].tool_calls[0].id, callId);
+            assert.strictEqual(out[0].tool_calls?.[0].id, callId);
         });
 
-      test("hoists system messages to the top", () => {
-          const messages: vscode.LanguageModelChatMessage[] = [
-                {
-                    role: vscode.LanguageModelChatMessageRole.User,
-                    content: [new vscode.LanguageModelTextPart("user1")],
-                    name: undefined,
-                },
-                // System message in the middle (e.g. injected context)
-                {
-                    role: 0 as any, // "System" isn't in the enum but mapRole handles strict check or fallback?
-                    // Wait, mapRole default is System. Let's force it via a mock or just assume default is used if not User/Assistant.
-                    // Actually, LanguageModelChatMessageRole has User(1) and Assistant(2). 0 or other might be System?
-                    // VS Code doesn't expose System role directly in the enum usually, but Copilot sends it?
-                    // Let's use a cast to simulate "System" if the enum doesn't have it, or rely on mapRole fallback.
-                    // mapRole implementation: if r===USER return user, if r===ASSISTANT return assistant, else return system.
-                    // So passing specific unrelated number works.
-                } as vscode.LanguageModelChatMessage, // Trick to pass invalid role?
-          ];
+        test("hoists system messages to the top", () => {
+            const systemRole = 3 as vscode.LanguageModelChatMessageRole;
+            const sysMsg = {
+                role: systemRole,
+                content: [new vscode.LanguageModelTextPart("sys instruction")],
+            } as vscode.LanguageModelChatMessage;
+            const userMsg = {
+                role: vscode.LanguageModelChatMessageRole.User,
+                content: [new vscode.LanguageModelTextPart("hi")],
+            } as vscode.LanguageModelChatMessage;
 
-          // Actually, let's just make a cleaner test with manual objects if the type allows
-          // The type is 'readonly vscode.LanguageModelChatMessage[]'.
-          const sysMsg = { role: 3, content: [new vscode.LanguageModelTextPart("sys instruction")] } as unknown as vscode.LanguageModelChatMessage;
-          const userMsg = { role: vscode.LanguageModelChatMessageRole.User, content: [new vscode.LanguageModelTextPart("hi")] } as vscode.LanguageModelChatMessage;
-
-          const msgs = [userMsg, sysMsg];
-          const out: any[] = convertMessages(msgs);
-
-          // Expect: [System, User]
-          assert.strictEqual(out.length, 2);
-          assert.strictEqual(out[0].role, "system");
-          assert.strictEqual(out[0].content, "sys instruction");
-          assert.strictEqual(out[1].role, "user");
-          assert.strictEqual(out[1].content, "hi");
-      });
+            const out = convertMessages([userMsg, sysMsg]);
+            assert.strictEqual(out.length, 2);
+            assert.strictEqual(out[0].role, "system");
+            assert.strictEqual(out[0].content, "sys instruction");
+            assert.strictEqual(out[1].role, "user");
+            assert.strictEqual(out[1].content, "hi");
+        });
 
 
     });
@@ -939,6 +1275,25 @@ suite("Llama.cpp Chat Provider Extension", () => {
 
             assert.equal((out.tools ?? []).length, 3);
         });
+
+		test("convertTools apiDirect prioritizes shared memory tools", () => {
+			const out = convertTools(
+				{
+					toolMode: vscode.LanguageModelChatToolMode.Auto,
+					tools: [
+						{ name: "unrelated_tool", description: "Other", inputSchema: { type: "object" } },
+						{ name: "llamacpp_store_memory", description: "Store memory", inputSchema: { type: "object" } },
+						{ name: "llamacpp_search_memory", description: "Search memory", inputSchema: { type: "object" } },
+					],
+				} satisfies vscode.ProvideLanguageModelChatResponseOptions,
+				{ mode: "apiDirect", apiDirectIncludeAllTools: true, apiDirectMaxTools: 2 }
+			);
+
+			assert.deepStrictEqual(
+				(out.tools ?? []).map(tool => tool.function.name),
+				["llamacpp_search_memory", "llamacpp_store_memory"]
+			);
+		});
     });
 
     suite("utils/validation", () => {
