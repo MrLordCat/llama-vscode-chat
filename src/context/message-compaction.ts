@@ -1,4 +1,8 @@
 import type { OpenAIChatMessage } from "../types";
+import { summarizeToolCallArguments, summarizeToolResultContent } from "./tool-result-summary";
+
+const MAX_SUMMARY_MESSAGES = 24;
+const MAX_SUMMARY_CHARS = 6000;
 
 export interface CompactMessagesOptions {
 	tokenBudget: number;
@@ -24,17 +28,20 @@ function summarizeMessage(message: OpenAIChatMessage): string {
 		const toolName = typeof message.name === "string" && message.name.trim().length > 0
 			? message.name.trim()
 			: "tool";
-		const size = typeof message.content === "string" ? message.content.length : 0;
-		return `[tool_result ${toolName}] ${size} chars omitted`;
+		const content = typeof message.content === "string" ? message.content : "";
+		return `[tool_result ${toolName}] ${summarizeToolResultContent(content, 700)}`;
 	}
 
 	if (message.role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
-		const names = message.tool_calls
-			.map(call => call.function?.name)
-			.filter((name): name is string => typeof name === "string" && name.length > 0);
-		if (names.length > 0) {
-			const shown = names.slice(0, 3).join(", ");
-			const extra = names.length > 3 ? ` +${names.length - 3} more` : "";
+		const calls = message.tool_calls
+			.filter(call => typeof call.function?.name === "string" && call.function.name.length > 0)
+			.map(call => {
+				const args = summarizeToolCallArguments(call.function.arguments);
+				return `${call.function.name}${args ? `(${args})` : ""}`;
+			});
+		if (calls.length > 0) {
+			const shown = calls.slice(0, 3).join(", ");
+			const extra = calls.length > 3 ? ` +${calls.length - 3} more` : "";
 			return `[tool_calls] ${shown}${extra}`;
 		}
 		return `[tool_calls] ${message.tool_calls.length}`;
@@ -69,14 +76,21 @@ export function compactMessages(
 	const keepLast = Math.min(nonSystem.length, Math.max(1, options.keepLastCount));
 	const head = nonSystem.slice(0, Math.max(0, nonSystem.length - keepLast));
 	let tail = nonSystem.slice(Math.max(0, nonSystem.length - keepLast)).map(cloneMessage);
-	const summaryLines = head.slice(-24).flatMap(message => {
+	const summaryLines: string[] = [];
+	let summaryChars = 0;
+	for (const message of head.slice(-MAX_SUMMARY_MESSAGES).reverse()) {
 		const text = summarizeMessage(message).replace(/\s+/g, " ").trim();
 		if (!text) {
-			return [];
+			continue;
 		}
-		const clipped = text.length > 220 ? `${text.slice(0, 220)}...` : text;
-		return [`- ${message.role}: ${clipped}`];
-	});
+		const clipped = text.length > 480 ? `${text.slice(0, 480)}...` : text;
+		const line = `- ${message.role}: ${clipped}`;
+		if (summaryLines.length > 0 && summaryChars + line.length > MAX_SUMMARY_CHARS) {
+			break;
+		}
+		summaryLines.unshift(line);
+		summaryChars += line.length;
+	}
 	const summaryText = summaryLines.length > 0
 		? `${options.label}:\n${summaryLines.join("\n")}`
 		: `${options.label}: prior turns were compacted to fit model context.`;

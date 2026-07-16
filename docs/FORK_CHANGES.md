@@ -44,6 +44,10 @@ repository metadata, documentation, and release artifacts belong to the fork.
   consume the context window.
 - Exact streamed token usage is forwarded to Copilot Session Info when the
   server provides it; a local estimate is used otherwise.
+- Local preflight budgeting uses llama.cpp's real chat template and tokenizer,
+  with cached fallback-safe `/apply-template` and `/tokenize` requests.
+- Compaction retains bounded tool names, safe arguments, paths, statuses,
+  diagnostics, and JSON structure instead of dropping old tool results entirely.
 - llama.cpp and DeepSeek cache-hit counters are normalized and shown in Quick
   Access diagnostics.
 
@@ -51,9 +55,13 @@ repository metadata, documentation, and release artifacts belong to the fork.
 
 - Native reasoning fields and `<think>` blocks are separated from visible
   answer text.
+- Qwen 3.6 can preserve historical reasoning across multi-step tool turns, and
+  effective reasoning kwargs are included in sanitized request diagnostics.
 - Small text chunks are coalesced to reduce UI update pressure during long
   answers.
 - Empty output and repeated tool-only turns have bounded recovery paths.
+- Network failures and HTTP 429/502/503/504 responses have cancellation-aware
+  pre-stream exponential backoff; timeouts and arbitrary client errors do not.
 - An optional Copilot Chat patch exposes native Thinking Effort and the real
   model output limit. See [Copilot Chat Integration](COPILOT_PATCH.md).
 

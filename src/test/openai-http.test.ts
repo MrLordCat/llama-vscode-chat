@@ -2,7 +2,9 @@ import * as assert from "node:assert";
 import {
 	getChatCompletionsEndpoint,
 	getModelsEndpoint,
+	isTransientHttpStatus,
 	OpenAIHttpTransport,
+	parseRetryAfterMs,
 } from "../transport/openai-http";
 
 suite("OpenAI HTTP transport", () => {
@@ -37,5 +39,15 @@ suite("OpenAI HTTP transport", () => {
 		assert.strictEqual(capturedUrl, "http://localhost:8000/v1/chat/completions");
 		assert.strictEqual(capturedInit?.method, "POST");
 		assert.strictEqual(capturedInit?.body, JSON.stringify({ model: "qwen" }));
+	});
+
+	test("classifies retryable statuses and parses Retry-After", () => {
+		assert.strictEqual(isTransientHttpStatus(429), true);
+		assert.strictEqual(isTransientHttpStatus(503), true);
+		assert.strictEqual(isTransientHttpStatus(500), false);
+		assert.strictEqual(isTransientHttpStatus(400), false);
+		assert.strictEqual(parseRetryAfterMs("1.5", 0), 1500);
+		assert.strictEqual(parseRetryAfterMs("Thu, 01 Jan 1970 00:00:02 GMT", 1000), 1000);
+		assert.strictEqual(parseRetryAfterMs("invalid", 0), undefined);
 	});
 });

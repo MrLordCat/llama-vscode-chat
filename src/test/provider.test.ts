@@ -515,6 +515,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
                     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
                     token: vscode.CancellationToken
                 ) => Promise<void>;
+                getEmittedThinkingText: (part: unknown) => string | undefined;
             };
 
             const encoder = new TextEncoder();
@@ -544,9 +545,14 @@ suite("Llama.cpp Chat Provider Extension", () => {
                 .join("");
             const hasThinkingPart = parts.some(part => (part as { constructor?: { name?: string } }).constructor?.name === "LanguageModelThinkingPart");
             const hasNonTextPart = parts.some(part => !(part instanceof vscode.LanguageModelTextPart));
+            const measuredThinking = parts
+                .map(part => providerAny.getEmittedThinkingText(part))
+                .filter((value): value is string => typeof value === "string")
+                .join("");
 
             assert.ok(text.includes("done"));
             assert.ok(hasThinkingPart || hasNonTextPart || text.includes("step 1 -> step 2"));
+            assert.strictEqual(measuredThinking, "step 1 -> step 2");
         });
 
         test("returns exact usage from the final SSE usage chunk", async () => {

@@ -25,7 +25,11 @@ VS Code language model provider. Stable compatibility ids remain under the
 - `src/context/output-budget.ts` separates normal per-source output defaults
   from explicit request limits and the global hard ceiling.
 - `src/context/message-compaction.ts` owns deterministic non-mutating history
-  compaction.
+  compaction with bounded structured summaries of old tool activity.
+- `src/context/server-token-counter.ts` owns llama.cpp chat-template application,
+  exact tokenization, short-lived count caching, and unsupported-server fallback.
+- `src/context/tool-result-summary.ts` extracts bounded, non-secret structural
+  facts shared by live tool-result truncation and history compaction.
 - `src/context/usage.ts` validates upstream token counters and builds the
   fallback statistics forwarded to native Copilot Session Info.
 - `src/reasoning.ts` maps VS Code session effort values to local and DeepSeek
@@ -62,15 +66,17 @@ model provider surface. Update it explicitly with `npm run update-vscode-api`.
 5. VS Code messages and tools are converted to OpenAI format.
 6. Relevant shared memory is inserted immediately before the latest user turn,
    preserving the stable cached prefix.
-7. Tool results are sanitized/truncated and the complete request is budgeted.
+7. Tool results are sanitized/summarized and the complete local prompt is
+   counted with the active server template and tokenizer when available.
 8. The serial transport queue grants the request slot.
 9. The pure request builder applies local or DeepSeek fields, then the request
    is sent to the source-specific chat completion endpoint.
 10. SSE chunks are coalesced and emitted as text, thinking, or tool-call parts.
 11. The final upstream usage chunk is validated and emitted as native `usage`
     response data, with an estimate used only when the server omits it.
-12. Context overflow, tool-role incompatibility, or empty output can trigger a
-   bounded compatibility retry.
+12. Transient transport failures can retry only before streaming starts;
+   context overflow, tool-role incompatibility, or empty output use separate
+   bounded recovery paths.
 
 ## Persistent Data
 
@@ -88,6 +94,9 @@ working.
 - Source prefixes are never sent as model ids to upstream servers.
 - DeepSeek-only fields and llama.cpp-only fields stay source-specific.
 - Memory and tool schemas count against the same request budget as messages.
+- Exact server counts include the active chat template and tool catalog; the
+  heuristic remains mandatory for OpenAI-compatible servers without tokenizer
+  endpoints.
 - Memory content is reference data and cannot override current system/user
   instructions.
 - Logs may contain counts, timings, model ids, and tool names, but not API keys

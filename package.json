@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/MrLordCat/llama-vscode-chat.git"
 	},
-	"version": "1.0.1",
+	"version": "1.1.0",
 	"engines": {
 		"vscode": "^1.104.0"
 	},
@@ -116,6 +116,18 @@
 					"type": "boolean",
 					"default": true,
 					"description": "Automatically compact old chat history before sending requests when close to context limit."
+				},
+				"llamacpp.accurateTokenCounting": {
+					"type": "boolean",
+					"default": true,
+					"description": "Use llama.cpp /apply-template and /tokenize for model-exact prompt counts. Falls back to local estimation when unsupported."
+				},
+				"llamacpp.tokenizerTimeoutMs": {
+					"type": "number",
+					"default": 10000,
+					"minimum": 1000,
+					"maximum": 30000,
+					"description": "Timeout for non-generating /apply-template and /tokenize requests used by accurate context accounting."
 				},
 				"llamacpp.retryOnContextOverflow": {
 					"type": "boolean",
@@ -228,6 +240,20 @@
 					"maximum": 1200000,
 					"description": "Maximum time a chat request can wait for the local llama.cpp request slot. Set to 0 to wait indefinitely."
 				},
+				"llamacpp.transientRetryMaxAttempts": {
+					"type": "number",
+					"default": 2,
+					"minimum": 0,
+					"maximum": 3,
+					"description": "Additional pre-stream retries for network failures and HTTP 429, 502, 503, or 504 responses. Timeout and cancellation are never retried."
+				},
+				"llamacpp.transientRetryBaseDelayMs": {
+					"type": "number",
+					"default": 500,
+					"minimum": 100,
+					"maximum": 10000,
+					"description": "Base exponential backoff delay for transient request retries. Retry-After takes precedence when supplied by the server."
+				},
 				"llamacpp.cachePrompt": {
 					"type": "boolean",
 					"default": true,
@@ -296,6 +322,11 @@
 					"minimum": 256,
 					"maximum": 65536,
 					"description": "Maximum hidden reasoning tokens for compatible local servers. light uses up to 512, balanced up to 2048, and high/deep/auto use this cap. DeepSeek uses high/max effort instead of this numeric value."
+				},
+				"llamacpp.preserveThinking": {
+					"type": "boolean",
+					"default": true,
+					"description": "Preserve Qwen 3.6 reasoning traces across multi-step tool turns when supported by the server chat template. Disable to minimize context use."
 				},
 				"llamacpp.toolResultMode": {
 					"type": "string",

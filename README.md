@@ -36,8 +36,12 @@ keeping tool calling, streaming responses, context budgeting, and diagnostics.
   - streamed `reasoning_content`
   - preservation of `reasoning_content` for assistant tool-call turns
 - Context budgeting, auto-compaction, and context-overflow retry.
-- Large tool-result truncation or summarization.
+- Exact local prompt counting through llama.cpp `/apply-template` and
+  `/tokenize`, with a heuristic fallback for other servers.
+- Code-aware history compaction and structured large tool-result summaries.
 - Tool-result artifact sanitization for transient metadata blobs.
+- Bounded pre-stream retry for transient network, rate-limit, and gateway
+  failures.
 - Request queueing for single-slot local llama.cpp generation.
 - Optional JSONL file logging.
 - Status bar metrics for throughput and context usage.
@@ -74,9 +78,11 @@ Recommended local defaults:
   "llamacpp.modelFamily": "auto",
   "llamacpp.cachePrompt": true,
   "llamacpp.autoCompact": true,
+  "llamacpp.accurateTokenCounting": true,
   "llamacpp.retryOnContextOverflow": true,
   "llamacpp.thinkingMode": "deep",
   "llamacpp.reasoningBudget": 16384,
+  "llamacpp.preserveThinking": true,
   "llamacpp.toolCallingMode": "apiDirect",
   "llamacpp.apiDirectIncludeAllTools": false,
   "llamacpp.apiDirectMaxTools": 48,
@@ -225,6 +231,12 @@ recognized by the maintained llama.cpp server fork. `max_tokens` includes both
 hidden reasoning and visible output, so it must remain larger than the reasoning
 cap.
 
+For Qwen 3.6, `preserveThinking` also sends
+`chat_template_kwargs.preserve_thinking=true` so multi-step tool turns can reuse
+reasoning traces that VS Code returns in history. The default Qwen sampling
+profile uses temperature 0.6, top-p 0.95, top-k 20, min-p 0, and presence
+penalty 0 unless the chat session supplies explicit values.
+
 DeepSeek does not consume the numeric local budget. It receives High effort for
 Auto/Light/Balanced and Max effort for Deep. See
 [Tokens, Reasoning, And Prompt Cache](docs/TOKENS_REASONING_CACHE.md) for the
@@ -232,8 +244,11 @@ complete mapping, recommended profiles, and cache diagnostics.
 
 ## Context Management
 
-The provider estimates prompt size before each request and can compact old
-history when the conversation approaches the model context limit.
+For local llama.cpp servers, the provider applies the active chat template and
+tokenizes the complete messages + tools prompt before each request. Results are
+cached briefly. Servers without those endpoints, and DeepSeek, use the existing
+conservative estimate. Old history is compacted when the resolved count
+approaches the model context limit.
 
 Important settings:
 
@@ -245,6 +260,8 @@ Important settings:
   "llamacpp.hardCompactKeepLastTurns": 6,
   "llamacpp.minReplyReserveTokens": 1536,
   "llamacpp.autoCompact": true,
+  "llamacpp.accurateTokenCounting": true,
+  "llamacpp.tokenizerTimeoutMs": 10000,
   "llamacpp.retryOnContextOverflow": true
 }
 ```
@@ -421,10 +438,14 @@ Core:
 - `llamacpp.modelDiscoveryTimeoutMs`
 - `llamacpp.requestTimeoutMs`
 - `llamacpp.requestQueueTimeoutMs`
+- `llamacpp.transientRetryMaxAttempts`
+- `llamacpp.transientRetryBaseDelayMs`
 
 Context and output:
 
 - `llamacpp.autoCompact`
+- `llamacpp.accurateTokenCounting`
+- `llamacpp.tokenizerTimeoutMs`
 - `llamacpp.retryOnContextOverflow`
 - `llamacpp.contextUtilization`
 - `llamacpp.hardContextUtilization`
@@ -451,6 +472,7 @@ Reasoning:
 
 - `llamacpp.thinkingMode`
 - `llamacpp.reasoningBudget`
+- `llamacpp.preserveThinking`
 
 Memory:
 

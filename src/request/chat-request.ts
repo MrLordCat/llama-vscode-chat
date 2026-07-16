@@ -16,6 +16,9 @@ export interface BuildChatCompletionRequestInput {
 	reasoningBudget: number;
 	topP?: number;
 	topK?: number;
+	minP?: number;
+	presencePenalty?: number;
+	preserveThinking?: boolean;
 	tools?: OpenAIFunctionToolDef[];
 	toolChoice?: OpenAIToolChoice;
 }
@@ -51,6 +54,12 @@ export function buildChatCompletionRequest(
 		if (input.topK !== undefined) {
 			request.top_k = input.topK;
 		}
+		if (input.minP !== undefined) {
+			request.min_p = input.minP;
+		}
+		if (input.presencePenalty !== undefined) {
+			request.presence_penalty = input.presencePenalty;
+		}
 	}
 
 	if (isDeepSeek) {
@@ -65,6 +74,7 @@ export function buildChatCompletionRequest(
 		request.cache_prompt = input.cachePrompt;
 		request.chat_template_kwargs = {
 			enable_thinking: input.thinkingMode !== "off",
+			...(input.preserveThinking ? { preserve_thinking: true } : {}),
 		};
 		request.thinking_budget_tokens = input.reasoningBudget;
 	}

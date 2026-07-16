@@ -64,6 +64,7 @@ function formatContextUsage(metrics: LlamaChatContextUsageMetrics): ContextUsage
 		`Soft target: ${formatNumber(metrics.softInputTarget)}`,
 		`Hard target: ${formatNumber(metrics.hardInputTarget)}`,
 		`Free headroom: ${formatNumber(freeTokens)}`,
+		`Token count: ${metrics.tokenCountSource === "server" ? "exact server tokenizer" : "heuristic fallback"}`,
 		`Compaction: ${compaction}`,
 		`Attempt: #${metrics.attemptNo}`,
 	];

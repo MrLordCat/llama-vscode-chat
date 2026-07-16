@@ -33,7 +33,10 @@ For local requests the extension sends:
 
 ```json
 {
-  "chat_template_kwargs": { "enable_thinking": true },
+  "chat_template_kwargs": {
+    "enable_thinking": true,
+    "preserve_thinking": true
+  },
   "thinking_budget_tokens": 16384
 }
 ```
@@ -43,8 +46,26 @@ reasoning-budget sampler when the active template exposes thinking start/end
 tags. Models or servers without that support may ignore the numeric cap. The
 server-wide `--reasoning-budget` option remains the ultimate fallback.
 
+`preserve_thinking` is enabled only for detected Qwen 3.6 models and can be
+disabled with `llamacpp.preserveThinking`. Reasoning chunks are internally
+tagged before being forwarded to VS Code, so diagnostics count them correctly
+even when a host build uses a private or renamed ThinkingPart constructor.
+
 DeepSeek receives `thinking.type` and `reasoning_effort`; it does not receive
 llama.cpp's `cache_prompt` or numeric local reasoning budget.
+
+## Exact Local Prompt Counts
+
+With `llamacpp.accurateTokenCounting=true`, each distinct local prompt is sent
+through llama.cpp `/apply-template` with its actual messages, tools, and Qwen
+template kwargs, then through `/tokenize`. The short-lived result cache avoids
+repeating this work during retries. These calls perform no inference.
+
+When either endpoint is unavailable or exceeds `tokenizerTimeoutMs`, budgeting
+falls back to the character estimate. `chat.tokens.count` and the Context Usage
+tooltip report whether a turn used `server` or `heuristic` counting. DeepSeek
+continues to use the fallback before generation and returns authoritative usage
+after the response.
 
 ## Prompt Cache Behavior
 
@@ -90,7 +111,9 @@ Quality-oriented local coding:
 {
   "llamacpp.thinkingMode": "deep",
   "llamacpp.reasoningBudget": 16384,
+  "llamacpp.preserveThinking": true,
   "llamacpp.localDefaultMaxOutputTokens": 32768,
+  "llamacpp.accurateTokenCounting": true,
   "llamacpp.cachePrompt": true,
   "llamacpp.toolCallingMode": "apiDirect",
   "llamacpp.apiDirectMaxTools": 48,

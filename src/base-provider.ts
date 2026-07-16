@@ -58,6 +58,7 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
     private _thinkingTagBuffer = "";
     private _insideThinkingTag = false;
     private _thinkingFallbackHeaderEmitted = false;
+    private _emittedThinkingParts = new WeakMap<object, string>();
 
     /**
      * Creates a new instance of the base chat model provider.
@@ -281,6 +282,7 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
         this._thinkingTagBuffer = "";
         this._insideThinkingTag = false;
         this._thinkingFallbackHeaderEmitted = false;
+        this._emittedThinkingParts = new WeakMap<object, string>();
 
         const reader = responseBody.getReader();
         const decoder = new TextDecoder();
@@ -372,6 +374,11 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
         return {
             progress: {
                 report: part => {
+                    if (this.getEmittedThinkingText(part) !== undefined) {
+                        flush();
+                        progress.report(part);
+                        return;
+                    }
                     if (part instanceof vscode.LanguageModelTextPart) {
                         if (!part.value) {
                             return;
@@ -546,13 +553,13 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
 
         const ThinkingCtor = this.getThinkingConstructor();
         if (ThinkingCtor) {
-            progress.report(
-                new (ThinkingCtor as new (text: string, id?: string, metadata?: unknown) => unknown)(
-                    text,
-                    id,
-                    metadata
-                ) as unknown as vscode.LanguageModelResponsePart
-            );
+            const part = new (ThinkingCtor as new (text: string, id?: string, metadata?: unknown) => unknown)(
+                text,
+                id,
+                metadata
+            ) as unknown as vscode.LanguageModelResponsePart;
+            this.rememberThinkingPart(part, text);
+            progress.report(part);
             return true;
         }
 
@@ -560,8 +567,23 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
             progress.report(new vscode.LanguageModelTextPart("\n[thinking]\n"));
             this._thinkingFallbackHeaderEmitted = true;
         }
-        progress.report(new vscode.LanguageModelTextPart(text));
+        const fallbackPart = new vscode.LanguageModelTextPart(text);
+        this.rememberThinkingPart(fallbackPart, text);
+        progress.report(fallbackPart);
         return true;
+    }
+
+    private rememberThinkingPart(part: vscode.LanguageModelResponsePart, text: string): void {
+        if (part && typeof part === "object") {
+            this._emittedThinkingParts.set(part, text);
+        }
+    }
+
+    protected getEmittedThinkingText(part: unknown): string | undefined {
+        if (!part || typeof part !== "object") {
+            return undefined;
+        }
+        return this._emittedThinkingParts.get(part);
     }
 
     private extractThinkingPayload(value: unknown): { text: string; id?: string; metadata?: unknown } {

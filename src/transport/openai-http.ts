@@ -25,6 +25,25 @@ export function getModelsEndpoint(serverUrl: string): string {
 		: `${serverUrl}/v1/models`;
 }
 
+export function isTransientHttpStatus(status: number): boolean {
+	return status === 429 || status === 502 || status === 503 || status === 504;
+}
+
+export function parseRetryAfterMs(value: string | null, now = Date.now()): number | undefined {
+	if (!value) {
+		return undefined;
+	}
+	const seconds = Number(value);
+	if (Number.isFinite(seconds) && seconds >= 0) {
+		return Math.round(seconds * 1000);
+	}
+	const date = Date.parse(value);
+	if (!Number.isFinite(date)) {
+		return undefined;
+	}
+	return Math.max(0, date - now);
+}
+
 export class OpenAIHttpTransport {
 	constructor(private readonly fetchImplementation?: FetchImplementation) {}
 

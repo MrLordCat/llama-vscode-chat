@@ -23,6 +23,8 @@ import {
 import { calculateContextBudget, estimateContextUsage } from "./context/context-budget";
 import { compactMessages } from "./context/message-compaction";
 import { resolveOutputTokenBudget } from "./context/output-budget";
+import { ServerTokenCounter } from "./context/server-token-counter";
+import { summarizeToolResultContent } from "./context/tool-result-summary";
 import { calculatePromptCacheUsage, estimateChatTokenUsage, type ChatTokenUsage } from "./context/usage";
 import { convertMessages, convertTools, validateRequest, type ToolCallingMode, type ToolResultMode } from "./utils";
 import { LlamaLogSink } from "./logger";
@@ -48,7 +50,9 @@ import {
     getChatCompletionsEndpoint,
     getModelsEndpoint,
     isDeepSeekEndpoint,
+    isTransientHttpStatus,
     OpenAIHttpTransport,
+    parseRetryAfterMs,
 } from "./transport/openai-http";
 import type { OpenAIChatMessage } from "./types";
 
@@ -113,6 +117,7 @@ export interface LlamaChatContextUsageMetrics {
     estimatedUsedTokens: number;
     estimatedFreeTokens: number;
     estimatedUsagePercent: number;
+    tokenCountSource: "server" | "heuristic";
 }
 
 interface PreparedMessagesForBudget {
@@ -124,6 +129,7 @@ interface PreparedMessagesForBudget {
     autoCompacted: boolean;
     hardCompacted: boolean;
     hardTarget: number;
+    tokenCountSource: "server" | "heuristic";
 }
 
 /**
@@ -144,6 +150,9 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
     private readonly runtimeContextCache = new Map<string, RuntimeContextCacheEntry>();
     private readonly chatRequestQueue: SerialRequestQueue;
     private readonly httpTransport = new OpenAIHttpTransport();
+    private readonly serverTokenCounter = new ServerTokenCounter(
+        (url, init, timeoutMs, cancellation) => this.httpTransport.request(url, init, timeoutMs, cancellation)
+    );
 
     /**
      * Creates a new Llama.cpp chat model provider.
@@ -168,6 +177,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
     refreshLanguageModelChatInformation(): void {
         this.modelListCache.clear();
         this.runtimeContextCache.clear();
+        this.serverTokenCounter.clear();
         this.log("models.refresh.requested");
         this._onDidChangeLanguageModelChatInformation.fire();
     }
@@ -313,6 +323,10 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             reasoning_effort: requestBody.reasoning_effort,
             reasoning_budget: requestBody.reasoning_budget,
             reasoning: requestBody.reasoning,
+            thinking_budget_tokens: requestBody.thinking_budget_tokens,
+            chat_template_kwargs: this.cloneForLog(requestBody.chat_template_kwargs),
+            min_p: requestBody.min_p,
+            presence_penalty: requestBody.presence_penalty,
             messages: this.summarizeMessagesForLog(requestBody.messages),
             tools: this.summarizeToolsForLog(requestBody.tools),
         };
@@ -782,18 +796,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
 
         const truncatedChars = content.length - maxChars;
         if (this.getSummarizeLargeToolResults()) {
-            const normalized = content.replace(/\r\n/g, "\n");
-            const trimmed = normalized.trimStart();
-            const lineCount = normalized.length > 0 ? normalized.split("\n").length : 0;
-            const format = trimmed.startsWith("{") || trimmed.startsWith("[") ? "json-like" : "text";
-            const previewLimit = Math.min(600, maxChars);
-            const compactPreview = normalized.slice(0, previewLimit).replace(/\s+/g, " ").trim();
-            const preview = compactPreview.length > 0
-                ? `\npreview: ${compactPreview.slice(0, 400)}${compactPreview.length > 400 ? "..." : ""}`
-                : "";
             return {
-                content:
-                    `[tool result summarized: original=${content.length} chars, lines=${lineCount}, omitted=${truncatedChars} chars, format=${format}]${preview}`,
+                content: summarizeToolResultContent(content, Math.min(maxChars, 1600)),
                 truncatedChars,
             };
         }
@@ -1438,9 +1442,13 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         const maxTools = this.clampInt(cfg.get("maxToolsPerRequest", 128), 0, 128, 128);
         const requestTimeoutMs = this.clampInt(cfg.get("requestTimeoutMs", 1200000), 10000, 1200000, 1200000);
         const requestQueueTimeoutMs = this.getRequestQueueTimeoutMs();
+        const transientRetryMaxAttempts = this.clampInt(cfg.get("transientRetryMaxAttempts", 2), 0, 3, 2);
+        const transientRetryBaseDelayMs = this.clampInt(cfg.get("transientRetryBaseDelayMs", 500), 100, 10000, 500);
         const cachePrompt = this.getCachePromptEnabled();
         const maxToolResultChars = this.getMaxToolResultChars();
         const autoCompact = cfg.get<boolean>("autoCompact", true) !== false;
+        const accurateTokenCounting = cfg.get<boolean>("accurateTokenCounting", true) !== false;
+        const tokenizerTimeoutMs = this.clampInt(cfg.get("tokenizerTimeoutMs", 10000), 1000, 30000, 10000);
         const retryOnOverflow = cfg.get<boolean>("retryOnContextOverflow", true) !== false;
         const emptyResponseAutoRetry = cfg.get<boolean>("emptyResponseAutoRetry", true) !== false;
         const emptyResponseAutoRetryMaxAttempts = this.clampInt(
@@ -1477,6 +1485,9 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             DEFAULT_LOCAL_REASONING_BUDGET
         );
         const reasoningBudget = resolveReasoningBudget(thinkingMode, configuredReasoningBudget);
+        const preserveThinking = resolvedFamily === "qwen"
+            && /qwen3[._-]?6/i.test(requestModelId)
+            && cfg.get<boolean>("preserveThinking", true) !== false;
         const toolResultModeConfig = this.normalizeToolResultMode(cfg.get("toolResultMode", "auto"));
         const toolCallingModeConfig = this.normalizeToolCallingMode(cfg.get("toolCallingMode", "apiDirect"));
         const apiDirectMaxTools = this.clampInt(cfg.get("apiDirectMaxTools", 48), 1, 128, 48);
@@ -1505,10 +1516,14 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 maxTools,
                 requestTimeoutMs,
                 requestQueueTimeoutMs,
+                transientRetryMaxAttempts,
+                transientRetryBaseDelayMs,
                 cachePrompt,
                 maxToolResultChars,
                 runtimeContextLength,
                 autoCompact,
+                accurateTokenCounting,
+                tokenizerTimeoutMs,
                 retryOnOverflow,
                 emptyResponseAutoRetry,
                 emptyResponseAutoRetryMaxAttempts,
@@ -1518,6 +1533,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 thinkingMode,
                 configuredReasoningBudget,
                 reasoningBudget,
+                preserveThinking,
                 toolResultModeConfig,
                 toolCallingModeConfig,
                 apiDirectMaxTools,
@@ -1617,8 +1633,12 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             deepSeekMaximum: DEEPSEEK_MAX_OUTPUT_TOKENS,
         });
         const { defaultMaxTokens: defaultMaxOutputTokens, requestedMaxTokens, maxTokens } = outputBudget;
-        const temperatureDefault = resolvedFamily === "deepseek" ? 1.0 : 0.7;
+        const temperatureDefault = resolvedFamily === "deepseek" ? 1.0 : resolvedFamily === "qwen" ? 0.6 : 0.7;
         const temperature = this.clampNumber(options.modelOptions?.temperature ?? temperatureDefault, 0, 2, temperatureDefault);
+        const rawModelOptions = options.modelOptions as Record<string, unknown> | undefined;
+        const qwenTopP = resolvedFamily === "qwen" ? 0.95 : undefined;
+        const qwenTopK = resolvedFamily === "qwen" ? 20 : undefined;
+        const qwenMinP = resolvedFamily === "qwen" ? 0 : undefined;
         const toolTokenCount = this.estimateToolTokens(cappedToolConfig.tools);
         const contextBudget = calculateContextBudget({
             contextLength,
@@ -1650,9 +1670,149 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             cappedTools: Array.isArray(cappedToolConfig.tools) ? cappedToolConfig.tools.length : 0,
         });
 
-        const prepareMessagesForBudget = (sourceMessages: OpenAIChatMessage[]): PreparedMessagesForBudget => {
+        const requestBody = buildChatCompletionRequest({
+            model: requestModelId,
+            family: resolvedFamily,
+            maxTokens,
+            temperature,
+            cachePrompt,
+            thinkingMode,
+            reasoningBudget,
+            topP: typeof options.modelOptions?.top_p === "number"
+                ? this.clampNumber(options.modelOptions.top_p, 0, 1, 1)
+                : qwenTopP,
+            topK: typeof options.modelOptions?.top_k === "number"
+                ? this.clampInt(options.modelOptions.top_k, 0, 1000, 40)
+                : qwenTopK,
+            minP: typeof rawModelOptions?.min_p === "number"
+                ? this.clampNumber(rawModelOptions.min_p, 0, 1, qwenMinP ?? 0)
+                : qwenMinP,
+            presencePenalty: typeof rawModelOptions?.presence_penalty === "number"
+                ? this.clampNumber(rawModelOptions.presence_penalty, -2, 2, 0)
+                : resolvedFamily === "qwen" ? 0 : undefined,
+            preserveThinking,
+            tools: cappedToolConfig.tools,
+            toolChoice: cappedToolConfig.tool_choice,
+        });
+
+        const headers: Record<string, string> = {
+            "Content-Type": "application/json",
+            "User-Agent": this.userAgent,
+        };
+        if (apiKey) {
+            headers["Authorization"] = `Bearer ${apiKey}`;
+        }
+
+        const waitForRetry = (delayMs: number): Promise<void> => new Promise((resolve, reject) => {
+            if (token.isCancellationRequested) {
+                reject(new vscode.CancellationError());
+                return;
+            }
+            const retryState: { timeoutHandle?: ReturnType<typeof setTimeout> } = {};
+            const cancellationSubscription = token.onCancellationRequested(() => {
+                if (retryState.timeoutHandle) {
+                    clearTimeout(retryState.timeoutHandle);
+                }
+                reject(new vscode.CancellationError());
+            });
+            retryState.timeoutHandle = setTimeout(() => {
+                cancellationSubscription.dispose();
+                resolve();
+            }, delayMs);
+        });
+
+        const sendWithTransientRetry = async (stage: string): Promise<Response> => {
+            const totalAttempts = transientRetryMaxAttempts + 1;
+            for (let transportAttempt = 1; transportAttempt <= totalAttempts; transportAttempt += 1) {
+                try {
+                    const response = await this.sendChatCompletion(serverUrl, headers, requestBody, requestTimeoutMs, token);
+                    if (!isTransientHttpStatus(response.status) || transportAttempt >= totalAttempts) {
+                        return response;
+                    }
+
+                    const errorText = await response.text();
+                    const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+                    const exponentialDelay = transientRetryBaseDelayMs * (2 ** (transportAttempt - 1));
+                    const delayMs = Math.min(30_000, retryAfterMs ?? Math.round(exponentialDelay + Math.random() * transientRetryBaseDelayMs * 0.25));
+                    this.log("chat.request.transient_retry", {
+                        requestId,
+                        stage,
+                        transportAttempt,
+                        status: response.status,
+                        statusText: response.statusText,
+                        delayMs,
+                        errorText: errorText.slice(0, 1000),
+                    });
+                    await waitForRetry(delayMs);
+                } catch (error) {
+                    const errorName = error instanceof Error ? error.name : "";
+                    if (
+                        token.isCancellationRequested
+                        || errorName === "AbortError"
+                        || errorName === "CancellationError"
+                        || transportAttempt >= totalAttempts
+                    ) {
+                        throw error;
+                    }
+
+                    const exponentialDelay = transientRetryBaseDelayMs * (2 ** (transportAttempt - 1));
+                    const delayMs = Math.min(30_000, Math.round(exponentialDelay + Math.random() * transientRetryBaseDelayMs * 0.25));
+                    this.logError("chat.request.transient_transport_retry", error, {
+                        requestId,
+                        stage,
+                        transportAttempt,
+                        delayMs,
+                    });
+                    await waitForRetry(delayMs);
+                }
+            }
+            throw new Error("Transient retry loop exhausted unexpectedly");
+        };
+
+        const countMessages = async (
+            candidate: OpenAIChatMessage[]
+        ): Promise<{ tokens: number; source: "server" | "heuristic"; promptTokens?: number }> => {
+            const heuristicTokens = this.estimateOpenAiMessageTokens(candidate);
+            if (!accurateTokenCounting || this.isDeepSeekServer(serverUrl)) {
+                return { tokens: heuristicTokens, source: "heuristic" };
+            }
+
+            const startedAt = Date.now();
+            const promptTokens = await this.serverTokenCounter.countChatPrompt({
+                serverUrl,
+                model: requestModelId,
+                headers,
+                messages: candidate,
+                tools: cappedToolConfig.tools,
+                chatTemplateKwargs: requestBody.chat_template_kwargs as Record<string, unknown> | undefined,
+                timeoutMs: tokenizerTimeoutMs,
+                cancellation: token,
+            });
+            const source = promptTokens === undefined ? "heuristic" : "server";
+            this.log("chat.tokens.count", {
+                requestId,
+                source,
+                messageCount: candidate.length,
+                promptTokens,
+                heuristicMessageTokens: heuristicTokens,
+                toolTokenEstimate: toolTokenCount,
+                durationMs: Date.now() - startedAt,
+            });
+            if (promptTokens === undefined) {
+                return { tokens: heuristicTokens, source };
+            }
+
+            return {
+                tokens: Math.max(1, promptTokens - toolTokenCount),
+                source,
+                promptTokens,
+            };
+        };
+
+        const prepareMessagesForBudget = async (sourceMessages: OpenAIChatMessage[]): Promise<PreparedMessagesForBudget> => {
             let preparedMessages = sourceMessages;
-            let messageTokenCount = this.estimateOpenAiMessageTokens(preparedMessages);
+            let counted = await countMessages(preparedMessages);
+            let messageTokenCount = counted.tokens;
             const initialMessageCount = preparedMessages.length;
             const initialTokenEstimate = messageTokenCount;
             let autoCompacted = false;
@@ -1662,6 +1822,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             this.log("chat.messages.initial", {
                 requestId,
                 tokenEstimate: messageTokenCount,
+                tokenCountSource: counted.source,
+                promptTokens: counted.promptTokens,
                 messageCount: preparedMessages.length,
             });
 
@@ -1672,11 +1834,14 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     keepLastTurns,
                     "Conversation summary (auto-compact)"
                 );
-                messageTokenCount = this.estimateOpenAiMessageTokens(preparedMessages);
+                counted = await countMessages(preparedMessages);
+                messageTokenCount = counted.tokens;
                 autoCompacted = true;
                 this.log("chat.messages.auto_compact", {
                     requestId,
                     tokenEstimate: messageTokenCount,
+                    tokenCountSource: counted.source,
+                    promptTokens: counted.promptTokens,
                     messageCount: preparedMessages.length,
                     target: softInputTarget,
                 });
@@ -1689,11 +1854,14 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     hardKeepLastTurns,
                     "Conversation summary (hard compact)"
                 );
-                messageTokenCount = this.estimateOpenAiMessageTokens(preparedMessages);
+                counted = await countMessages(preparedMessages);
+                messageTokenCount = counted.tokens;
                 hardCompacted = true;
                 this.log("chat.messages.hard_compact", {
                     requestId,
                     tokenEstimate: messageTokenCount,
+                    tokenCountSource: counted.source,
+                    promptTokens: counted.promptTokens,
                     messageCount: preparedMessages.length,
                     target: hardTarget,
                 });
@@ -1701,6 +1869,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     this.log("chat.messages.compact_failed", {
                         requestId,
                         tokenEstimate: messageTokenCount,
+                        tokenCountSource: counted.source,
                         hardTarget,
                     });
                     throw new Error("Conversation is still too large after compaction. Start a new chat or reduce history.");
@@ -1716,34 +1885,9 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 autoCompacted,
                 hardCompacted,
                 hardTarget,
+                tokenCountSource: counted.source,
             };
         };
-
-        const requestBody = buildChatCompletionRequest({
-            model: requestModelId,
-            family: resolvedFamily,
-            maxTokens,
-            temperature,
-            cachePrompt,
-            thinkingMode,
-            reasoningBudget,
-            topP: typeof options.modelOptions?.top_p === "number"
-                ? this.clampNumber(options.modelOptions.top_p, 0, 1, 1)
-                : undefined,
-            topK: typeof options.modelOptions?.top_k === "number"
-                ? this.clampInt(options.modelOptions.top_k, 0, 1000, 40)
-                : undefined,
-            tools: cappedToolConfig.tools,
-            toolChoice: cappedToolConfig.tool_choice,
-        });
-
-        const headers: Record<string, string> = {
-            "Content-Type": "application/json",
-            "User-Agent": this.userAgent,
-        };
-        if (apiKey) {
-            headers["Authorization"] = `Bearer ${apiKey}`;
-        }
 
         type AttemptResult =
             | { ok: true; response: Response; retriedAfterOverflow: boolean; attemptNo: number }
@@ -1761,7 +1905,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         const attemptRequest = async (sourceMessages: OpenAIChatMessage[]): Promise<AttemptResult> => {
             attemptCounter += 1;
             const attemptNo = attemptCounter;
-            const prepared = prepareMessagesForBudget(sourceMessages);
+            const prepared = await prepareMessagesForBudget(sourceMessages);
             requestBody.messages = prepared.messages;
 
             const cappedTools = Array.isArray(cappedToolConfig.tools) ? cappedToolConfig.tools.length : 0;
@@ -1796,6 +1940,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 estimatedUsedTokens,
                 estimatedFreeTokens,
                 estimatedUsagePercent,
+                tokenCountSource: prepared.tokenCountSource,
             };
             this.log("chat.context.usage", latestContextUsage);
             this._onDidUpdateContextUsage.fire(latestContextUsage);
@@ -1813,7 +1958,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             let response: Response;
             const requestStartedAt = Date.now();
             try {
-                response = await this.sendChatCompletion(serverUrl, headers, requestBody, requestTimeoutMs, token);
+                response = await sendWithTransientRetry("initial");
             } catch (error) {
                 this.logError("chat.request.transport_error", error, {
                     requestId,
@@ -1853,7 +1998,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     );
                     requestBody.messages = overflowMessages;
 
-                    const overflowMessageTokens = this.estimateOpenAiMessageTokens(overflowMessages);
+                    const overflowCount = await countMessages(overflowMessages);
+                    const overflowMessageTokens = overflowCount.tokens;
                     const {
                         estimatedUsedTokens: overflowEstimatedUsedTokens,
                         estimatedFreeTokens: overflowEstimatedFreeTokens,
@@ -1875,6 +2021,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                             estimatedUsedTokens: overflowEstimatedUsedTokens,
                             estimatedFreeTokens: overflowEstimatedFreeTokens,
                             estimatedUsagePercent: overflowEstimatedUsagePercent,
+                            tokenCountSource: overflowCount.source,
                         };
                         this.log("chat.context.usage", latestContextUsage);
                         this._onDidUpdateContextUsage.fire(latestContextUsage);
@@ -1892,7 +2039,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
 
                     const retryStartedAt = Date.now();
                     try {
-                        response = await this.sendChatCompletion(serverUrl, headers, requestBody, requestTimeoutMs, token);
+                        response = await sendWithTransientRetry("overflow");
                     } catch (error) {
                         this.logError("chat.request.overflow_retry_transport_error", error, {
                             requestId,
@@ -2029,7 +2176,14 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 const measuredProgress: Progress<LanguageModelResponsePart> = {
                     report: part => {
                         emittedParts += 1;
-                        if (part instanceof vscode.LanguageModelTextPart) {
+                        const emittedThinkingText = this.getEmittedThinkingText(part);
+                        if (emittedThinkingText !== undefined) {
+                            thinkingChars += emittedThinkingText.length;
+                            roundThinkingChars += emittedThinkingText.length;
+                            if (emittedThinkingText.length > 0 && firstOutputAt === undefined) {
+                                firstOutputAt = Date.now();
+                            }
+                        } else if (part instanceof vscode.LanguageModelTextPart) {
                             outputChars += part.value.length;
                             roundOutputChars += part.value.length;
                             if (part.value.length > 0 && firstOutputAt === undefined) {
