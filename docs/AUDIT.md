@@ -62,7 +62,7 @@ Both llama.cpp `prompt_tokens_details.cached_tokens` and DeepSeek
 
 - TypeScript strict compilation.
 - ESLint with no current findings.
-- 89 VS Code extension-host tests covering routing, context, requests,
+- 91 VS Code extension-host tests covering routing, context, requests,
   transport, queues, streaming, usage, tools, memory, and UI structure.
 - `npm audit` reports no known dependency vulnerabilities after controlled
   test-tool overrides.

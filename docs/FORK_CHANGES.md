@@ -60,7 +60,10 @@ repository metadata, documentation, and release artifacts belong to the fork.
 - Qwen 3.6 can preserve historical reasoning across multi-step tool turns, and
   effective reasoning kwargs are included in sanitized request diagnostics.
 - Small text chunks are coalesced to reduce UI update pressure during long
-  answers.
+  answers; progressively longer answers use a lower render cadence.
+- Cancelling a turn actively cancels the response body so an abandoned
+  generation cannot keep the only local server slot busy after VS Code has
+  released its request queue lease.
 - Empty output and repeated tool-only turns have bounded recovery paths.
 - Network failures and HTTP 429/502/503/504 responses have cancellation-aware
   pre-stream exponential backoff; timeouts and arbitrary client errors do not.

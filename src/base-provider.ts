@@ -16,6 +16,10 @@ import { normalizeChatTokenUsage, type ChatTokenUsage } from "./context/usage";
 export const DEFAULT_MAX_OUTPUT_TOKENS = 131072;
 export const DEFAULT_CONTEXT_LENGTH = 65536;
 const STREAM_TEXT_FLUSH_INTERVAL_MS = 50;
+const STREAM_TEXT_MEDIUM_FLUSH_INTERVAL_MS = 150;
+const STREAM_TEXT_LONG_FLUSH_INTERVAL_MS = 350;
+const STREAM_TEXT_MEDIUM_THRESHOLD_CHARS = 1000;
+const STREAM_TEXT_LONG_THRESHOLD_CHARS = 4000;
 const STREAM_TEXT_FLUSH_CHARS = 1024;
 
 /**
@@ -289,10 +293,26 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
         const coalescedProgress = this.createTextCoalescingProgress(progress);
         let buffer = "";
         let latestUsage: ChatTokenUsage | undefined;
+        let cancellationSubscription: vscode.Disposable | undefined;
+        const cancellationSignal = new Promise<"cancelled">(resolve => {
+            cancellationSubscription = token.onCancellationRequested(() => resolve("cancelled"));
+            if (token.isCancellationRequested) {
+                resolve("cancelled");
+            }
+        });
 
         try {
-            while (!token.isCancellationRequested) {
-                const { done, value } = await reader.read();
+            while (true) {
+                const outcome = await Promise.race([
+                    reader.read().then(result => ({ type: "read" as const, result })),
+                    cancellationSignal.then(() => ({ type: "cancelled" as const })),
+                ]);
+                if (outcome.type === "cancelled") {
+                    await reader.cancel("VS Code chat request cancelled").catch(() => undefined);
+                    throw new vscode.CancellationError();
+                }
+
+                const { done, value } = outcome.result;
                 if (done) {
                     break;
                 }
@@ -322,6 +342,10 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
             this.flushThinkingBuffers(coalescedProgress.progress);
             coalescedProgress.flush();
         } finally {
+            cancellationSubscription?.dispose();
+            if (token.isCancellationRequested) {
+                await reader.cancel("VS Code chat request cancelled").catch(() => undefined);
+            }
             coalescedProgress.flush();
             reader.releaseLock();
             // Clean up any leftover tool call state
@@ -345,6 +369,9 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
         progress: vscode.Progress<vscode.LanguageModelResponsePart>
     ): { progress: vscode.Progress<vscode.LanguageModelResponsePart>; flush: () => void } {
         let bufferedText = "";
+        let bufferedKind: "text" | "thinking" = "text";
+        let bufferedThinkingTemplate: vscode.LanguageModelResponsePart | undefined;
+        let emittedChars = 0;
         let flushTimer: ReturnType<typeof setTimeout> | undefined;
 
         const clearFlushTimer = (): void => {
@@ -360,29 +387,74 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
                 return;
             }
             const text = bufferedText;
+            const kind = bufferedKind;
+            const thinkingTemplate = bufferedThinkingTemplate;
             bufferedText = "";
-            progress.report(new vscode.LanguageModelTextPart(text));
+            bufferedThinkingTemplate = undefined;
+            emittedChars += text.length;
+            if (kind === "thinking") {
+                const ThinkingCtor = this.getThinkingConstructor();
+                let part: vscode.LanguageModelResponsePart;
+                if (ThinkingCtor) {
+                    const template = thinkingTemplate as unknown as Record<string, unknown> | undefined;
+                    part = new ThinkingCtor(
+                        text,
+                        typeof template?.id === "string" ? template.id : undefined,
+                        template?.metadata
+                    ) as vscode.LanguageModelResponsePart;
+                } else {
+                    part = new vscode.LanguageModelTextPart(text);
+                }
+                this.rememberThinkingPart(part, text);
+                progress.report(part);
+            } else {
+                progress.report(new vscode.LanguageModelTextPart(text));
+            }
+        };
+
+        const getFlushIntervalMs = (): number => {
+            if (emittedChars >= STREAM_TEXT_LONG_THRESHOLD_CHARS) {
+                return STREAM_TEXT_LONG_FLUSH_INTERVAL_MS;
+            }
+            if (emittedChars >= STREAM_TEXT_MEDIUM_THRESHOLD_CHARS) {
+                return STREAM_TEXT_MEDIUM_FLUSH_INTERVAL_MS;
+            }
+            return STREAM_TEXT_FLUSH_INTERVAL_MS;
         };
 
         const scheduleFlush = (): void => {
             if (flushTimer) {
                 return;
             }
-            flushTimer = setTimeout(flush, STREAM_TEXT_FLUSH_INTERVAL_MS);
+            flushTimer = setTimeout(flush, getFlushIntervalMs());
         };
 
         return {
             progress: {
                 report: part => {
-                    if (this.getEmittedThinkingText(part) !== undefined) {
-                        flush();
-                        progress.report(part);
+                    const thinkingText = this.getEmittedThinkingText(part);
+                    if (thinkingText !== undefined) {
+                        if (bufferedText && bufferedKind !== "thinking") {
+                            flush();
+                        }
+                        bufferedKind = "thinking";
+                        bufferedThinkingTemplate = bufferedThinkingTemplate ?? part;
+                        bufferedText += thinkingText;
+                        if (bufferedText.length >= STREAM_TEXT_FLUSH_CHARS) {
+                            flush();
+                        } else {
+                            scheduleFlush();
+                        }
                         return;
                     }
                     if (part instanceof vscode.LanguageModelTextPart) {
                         if (!part.value) {
                             return;
                         }
+                        if (bufferedText && bufferedKind !== "text") {
+                            flush();
+                        }
+                        bufferedKind = "text";
                         bufferedText += part.value;
                         if (bufferedText.length >= STREAM_TEXT_FLUSH_CHARS) {
                             flush();

@@ -634,6 +634,70 @@ suite("Llama.cpp Chat Provider Extension", () => {
             assert.ok(textParts.length < 10, `expected coalesced text parts, got ${textParts.length}`);
         });
 
+        test("coalesces many small reasoning deltas without losing thinking metadata", async () => {
+            const providerAny = provider as unknown as {
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<void>;
+                getEmittedThinkingText: (part: unknown) => string | undefined;
+            };
+
+            const encoder = new TextEncoder();
+            const chunks = Array.from(
+                { length: 100 },
+                () => "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"r\"}}]}\n\n"
+            ).join("");
+            const stream = new ReadableStream<Uint8Array>({
+                start(controller) {
+                    controller.enqueue(encoder.encode(`${chunks}data: [DONE]\n\n`));
+                    controller.close();
+                },
+            });
+
+            const parts: vscode.LanguageModelResponsePart[] = [];
+            await providerAny.processStreamingResponse(
+                stream,
+                { report: part => parts.push(part) },
+                new vscode.CancellationTokenSource().token
+            );
+
+            const thinkingParts = parts
+                .map(part => providerAny.getEmittedThinkingText(part))
+                .filter((text): text is string => text !== undefined);
+            assert.strictEqual(thinkingParts.join(""), "r".repeat(100));
+            assert.ok(thinkingParts.length < 10, `expected coalesced thinking parts, got ${thinkingParts.length}`);
+        });
+
+        test("cancels the upstream response body while waiting for a stream chunk", async () => {
+            const providerAny = provider as unknown as {
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<void>;
+            };
+
+            let upstreamCancelled = false;
+            const stream = new ReadableStream<Uint8Array>({
+                cancel() {
+                    upstreamCancelled = true;
+                },
+            });
+            const cancellation = new vscode.CancellationTokenSource();
+            const processing = providerAny.processStreamingResponse(
+                stream,
+                { report: () => undefined },
+                cancellation.token
+            );
+
+            cancellation.cancel();
+            await assert.rejects(processing, error => error instanceof vscode.CancellationError);
+            assert.strictEqual(upstreamCancelled, true);
+            cancellation.dispose();
+        });
+
         test("flushes buffered tool calls when stream ends without DONE", async () => {
             const providerAny = provider as unknown as {
                 processStreamingResponse: (

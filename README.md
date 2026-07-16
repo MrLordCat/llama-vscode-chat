@@ -27,7 +27,8 @@ keeping tool calling, streaming responses, context budgeting, and diagnostics.
   - primary OpenAI-compatible server from `llamacpp.serverUrl`
   - dedicated local server from `llamacpp.localServerUrl`
   - DeepSeek API from `https://api.deepseek.com`
-- Streaming text responses with chunk coalescing to reduce VS Code UI stalls.
+- Adaptive text/reasoning chunk coalescing to reduce VS Code UI stalls, with
+  upstream stream cancellation so stopped turns release the llama.cpp slot.
 - Tool calling with OpenAI `tools` and `tool` result messages.
 - API Direct tool mode for compact tool schemas and prioritized tool selection.
 - DeepSeek thinking-mode support:

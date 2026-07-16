@@ -2109,7 +2109,15 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         try {
             chatSlot = await this.acquireChatRequestSlot(requestId, requestQueueTimeoutMs, token);
         } catch (error) {
-            this.logError("chat.queue.failed", error, { requestId, requestQueueTimeoutMs });
+            const cancelled = token.isCancellationRequested || error instanceof vscode.CancellationError;
+            if (cancelled) {
+                this.log("chat.queue.cancelled", {
+                    requestId,
+                    requestQueueTimeoutMs,
+                });
+            } else {
+                this.logError("chat.queue.failed", error, { requestId, requestQueueTimeoutMs });
+            }
             throw error;
         }
         try {
@@ -2362,8 +2370,19 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
 
             this._onDidCompleteChatTurn.fire(metrics);
         } catch (err) {
-            this.logError("chat.turn.failed", err, { requestId });
-            console.error("[Llama.cpp Provider] Chat request failed", err);
+            const cancelled = token.isCancellationRequested || err instanceof vscode.CancellationError;
+            if (cancelled) {
+                this.log("chat.turn.cancelled", {
+                    requestId,
+                    durationMs: Date.now() - turnStartedAt,
+                    emittedParts,
+                    outputChars,
+                    thinkingChars,
+                });
+            } else {
+                this.logError("chat.turn.failed", err, { requestId });
+                console.error("[Llama.cpp Provider] Chat request failed", err);
+            }
             throw err;
         } finally {
             chatSlot?.release();
