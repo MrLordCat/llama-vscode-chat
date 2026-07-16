@@ -46,6 +46,10 @@ Copilot Chat uses this data for the native Session Info panel. If an otherwise
 compatible server does not return usage, the provider sends a conservative
 character-based estimate so the panel does not stay at `0 / N tokens`.
 
+The extension also normalizes llama.cpp `cached_tokens` and DeepSeek
+`prompt_cache_hit_tokens` for its own Prompt Cache diagnostic. Copilot's native
+panel still receives the standard OpenAI-compatible nested shape.
+
 The context-window denominator comes from the model metadata advertised by the
 provider. For local models this is resolved from runtime server metadata when
 available; the configured fallback is used otherwise.

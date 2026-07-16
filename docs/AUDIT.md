@@ -1,107 +1,90 @@
-# Project Audit - 2026-07-16
+# Project Audit - Version 1.0.0
 
-## Outcome
+## Result
 
-The repository has a solid functional core and unusually good coverage of
-provider compatibility edge cases, but rapid feature work concentrated too many
-responsibilities in `llama-provider.ts` and `extension.ts`. This audit begins a
-staged refactor without rewriting stable streaming or tool behavior.
+The rapid-prototype codebase has been converted into an independently owned,
+tested extension with explicit boundaries for local llama.cpp and DeepSeek.
+Version 1.0.0 is the first release where repository metadata, runtime behavior,
+documentation, build tooling, and local installation all belong to this fork.
 
-Completed in the first cleanup pass:
+## Completed Work
 
-- changed extension ownership metadata to `MrLordCat` and the fork repository;
-- preserved original MIT attribution and added current ownership;
-- added a separate shared-memory subsystem with persistence, retrieval, prompt
-  injection, Agent mode tools, commands, limits, and tests;
-- separated DeepSeek and primary-server credentials with a legacy fallback;
-- centralized shared ids, endpoints, and limits;
-- removed the inactive Hugging Face provider, a duplicate API declaration, and
-  a committed runtime log;
-- removed network downloads from `postinstall` and made VS Code API refresh an
-  explicit development command;
-- isolated VS Code test profiles by Windows username;
-- documented runtime architecture and durable memory.
+- Changed publisher, repository, issue tracker, display name, and documentation
+  to the independent `MrLordCat` fork while preserving MIT attribution.
+- Kept local, primary OpenAI-compatible, and DeepSeek sources available at the
+  same time through source-prefixed internal model ids.
+- Separated primary and DeepSeek credentials in VS Code SecretStorage.
+- Added durable shared memory with retrieval, automatic bounded injection,
+  inspectable storage, and confirmed Agent tools.
+- Added local and DeepSeek request profiles, exact streamed usage forwarding,
+  native context metrics, and the optional guarded Copilot Chat patch.
+- Added serial local request admission, bounded compatibility retries, stream
+  coalescing, tool-result protection, and structured privacy-conscious logs.
 
-Completed in the second cleanup pass:
+## 1.0 Refactoring
 
-- extracted reasoning mode normalization and request-level overrides;
-- extracted context budget/usage arithmetic with focused tests;
-- added native model configuration metadata for Thinking Effort;
-- added a guarded, reversible Copilot Chat patcher for extension-provided model
-  controls and output limits.
-- extracted and reorganized Quick Access into compact native tree groups with
-  view-title actions and structure tests.
+- `src/model-sources/` now owns source construction, URL deduplication, model
+  ids, and family routing.
+- `src/context/` now owns input budgets, output limits, usage normalization,
+  prompt-cache metrics, and non-mutating history compaction.
+- `src/request/` owns source-specific request payloads.
+- `src/transport/` owns endpoint resolution, HTTP timeout/cancellation, and the
+  serial request queue.
+- `src/ui/` owns Quick Access and model-behavior command handlers.
+- `src/extension.ts` is a smaller composition root; `src/llama-provider.ts`
+  remains the turn lifecycle coordinator.
 
-Completed in the third integration pass:
+The refactor removed duplicate in-class implementations and reduced the two
+largest change hotspots while retaining focused compatibility tests.
 
-- requested exact streamed token usage from llama.cpp and DeepSeek;
-- forwarded validated usage to Copilot's native Session Info with an estimate
-  fallback for compatible servers that omit counters;
-- documented the complete fork scope and the ownership boundary between the
-  normal VSIX and optional Copilot Chat bundle modifications.
+## Token And Cache Findings
 
-Completed in the fourth refactoring pass:
+The audit found and corrected four material efficiency problems:
 
-- extracted the local and DeepSeek chat-completion request profiles into a
-  pure builder with table-driven tests;
-- removed source-specific sampling, reasoning, cache, usage, and tool-field
-  assembly from the request lifecycle method.
+1. `maxOutputTokensCap` was also used as the default `max_tokens`, causing an
+   ordinary DeepSeek turn to reserve as many as 393216 output tokens. Local and
+   DeepSeek now have separate normal defaults while the original setting is a
+   hard ceiling only.
+2. `apiDirectIncludeAllTools=false` behaved the same as `true`. API Direct now
+   uses a prioritized 48-tool subset by default and also enforces an approximate
+   serialized schema budget.
+3. Retrieved memory rewrote the first system message every turn, invalidating
+   the reusable llama.cpp prompt prefix. It is now inserted immediately before
+   the latest user request.
+4. The local numeric reasoning setting used generic fields not consumed by the
+   maintained llama.cpp server. Requests now send `thinking_budget_tokens` and
+   `chat_template_kwargs.enable_thinking`.
 
-Completed in the fifth refactoring pass:
+Both llama.cpp `prompt_tokens_details.cached_tokens` and DeepSeek
+`prompt_cache_hit_tokens` are normalized, logged, and displayed in Diagnostics.
 
-- extracted serial request admission from the provider into a transport queue;
-- added isolated coverage for FIFO ordering, cancellation, queue timeout, and
-  idempotent lease release;
-- kept queue telemetry compatible with the existing structured log events.
+## Quality Gates
 
-## Findings
+- TypeScript strict compilation.
+- ESLint with no current findings.
+- 79 VS Code extension-host tests covering routing, context, requests,
+  transport, queues, streaming, usage, tools, memory, and UI structure.
+- `npm audit` reports no known dependency vulnerabilities after controlled
+  test-tool overrides.
+- CI runs install, lint, extension-host tests, and VSIX packaging.
+- Tags matching `v*` run the same checks and create a GitHub release with the
+  packaged VSIX.
 
-### High Priority
+## Residual Risks
 
-1. `src/llama-provider.ts` remains a large change hotspot. Discovery, routing,
-   caching, budgeting, request profiles, queueing, retry policy, and telemetry
-   should move behind narrow modules.
-2. `src/extension.ts` still mixes composition, status presentation, and every
-   command handler. Quick Access is extracted; command handlers should follow
-   after provider boundaries stabilize.
-3. Most model settings are global even though local models and DeepSeek have
-   different optimal output, timeout, and tool policies. Request payload
-   profiles are now separate; configurable per-source settings remain.
-4. Compaction is deterministic but lossy and heuristic. It clips old turns and
-   tool payloads instead of producing a model-assisted semantic summary. Keep
-   the deterministic fallback, then add an optional tested summarizer.
+- Token estimation remains character-based when a server omits exact usage.
+- Deterministic compaction is intentionally lossy; model-assisted summarization
+  could preserve more semantics but would add latency, cost, and failure modes.
+- Prompt cache reuse depends on server slot policy and exact prefix stability;
+  alternating unrelated chats on one slot can still replace the useful cache.
+- The Copilot patch targets private bundled code and must be revalidated after
+  VS Code or Copilot updates. It remains optional and fail-closed.
+- `src/llama-provider.ts` is still large because retries, streaming, and metrics
+  share turn-local state. Further splitting should be driven by a concrete
+  stable interface, not line count alone.
 
-### Medium Priority
+## Release Decision
 
-1. HTTP behavior is tested through patched private methods and global `fetch`.
-   Inject a transport interface so discovery, retries, cancellation, and error
-   parsing can be unit tested directly.
-2. Token counts use a character heuristic. Add optional server/tokenizer-backed
-   counting with the current estimator as a fast fallback.
-3. There is no CI workflow. Add compile, lint, tests, manifest validation, and
-   VSIX packaging on supported Windows/Linux runners.
-4. Packaging relies on an on-demand `npx @vscode/vsce`. Pin `@vscode/vsce` as a
-   development dependency when the Node toolchain is normalized.
-5. The benchmark corpus under `subprojects/mcp-token-cost` is useful but large.
-   Keep it dev-only and publish summarized conclusions in normal docs.
-
-### Low Priority
-
-1. Naming still contains `llamacpp` for compatibility. User-facing labels can
-   migrate to Local LLM while command ids and settings remain stable.
-2. Source formatting mixes tabs and spaces in older files. Apply formatting
-   only after large classes are split to avoid an unreadable full-file diff.
-3. Some comments repeat the code or reference older single-source behavior.
-   Clean them as their owning modules are extracted.
-
-## Refactoring Sequence
-
-1. Extract model source discovery and source-specific credentials.
-2. Extract the remaining context compaction policy (budget arithmetic is done).
-3. Extract the remaining request execution and retry state machine (queueing is
-   done).
-4. Split extension commands and status presentation (Quick Access is done).
-5. Add CI and release automation.
-
-The rule for each phase is behavior-preserving extraction first, then targeted
-improvements. The full provider test suite must remain green after every phase.
+The repository is ready for version 1.0.0. Remaining items are future product
+improvements rather than unfinished cleanup required for a reliable local and
+DeepSeek provider.

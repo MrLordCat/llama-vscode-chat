@@ -3,6 +3,7 @@
 .vscode-test.mjs
 .venv/**
 .tools/**
+.github/**
 src/**
 out/test/**
 subprojects/**

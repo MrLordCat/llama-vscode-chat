@@ -76,9 +76,11 @@ Recommended local defaults:
   "llamacpp.autoCompact": true,
   "llamacpp.retryOnContextOverflow": true,
   "llamacpp.toolCallingMode": "apiDirect",
-  "llamacpp.apiDirectIncludeAllTools": true,
-  "llamacpp.apiDirectMaxTools": 128,
+  "llamacpp.apiDirectIncludeAllTools": false,
+  "llamacpp.apiDirectMaxTools": 48,
+  "llamacpp.apiDirectToolTokenBudget": 12000,
   "llamacpp.toolResultMode": "auto",
+  "llamacpp.localDefaultMaxOutputTokens": 32768,
   "llamacpp.maxOutputTokensCap": 131072
 }
 ```
@@ -101,19 +103,23 @@ profile:
 {
   "llamacpp.enableDeepSeek": true,
   "llamacpp.maxOutputTokensCap": 393216,
+  "llamacpp.deepSeekDefaultMaxOutputTokens": 65536,
   "llamacpp.thinkingMode": "deep",
+  "llamacpp.reasoningBudget": 8192,
   "llamacpp.toolCallingMode": "apiDirect",
-  "llamacpp.apiDirectMaxTools": 128,
-  "llamacpp.apiDirectIncludeAllTools": true,
+  "llamacpp.apiDirectMaxTools": 48,
+  "llamacpp.apiDirectIncludeAllTools": false,
+  "llamacpp.apiDirectToolTokenBudget": 12000,
   "llamacpp.toolResultMode": "auto",
   "llamacpp.requestTimeoutMs": 1200000,
   "llamacpp.requestQueueTimeoutMs": 1200000
 }
 ```
 
-For everyday coding work, `maxOutputTokensCap = 131072` is often a better
-latency/context tradeoff than the full `393216` maximum. The full maximum
-reserves a very large answer budget and can cause earlier history compaction.
+`deepSeekDefaultMaxOutputTokens` is the normal per-turn request. The larger
+`maxOutputTokensCap` is only an absolute ceiling for sessions that explicitly
+request more output, so keeping the DeepSeek maximum available no longer forces
+every turn to reserve 393216 tokens.
 
 ## Model Sources
 
@@ -159,7 +165,9 @@ API Direct keeps tool calling enabled while reducing prompt overhead:
 - Descriptions are shortened.
 - Tools are priority-ordered before applying the cap.
 - `apiDirectMaxTools` controls the final tool count.
-- `apiDirectIncludeAllTools = true` includes all advertised tools up to the cap.
+- `apiDirectToolTokenBudget` limits the approximate serialized schema cost.
+- `apiDirectIncludeAllTools = false` keeps the efficient prioritized subset.
+- Strict required-tool requests always retain the requested tool.
 - `maxToolsPerRequest` applies only to classic mode.
 
 When `run_in_terminal` is available and tool mode is not strict-required, the
@@ -198,6 +206,28 @@ This fork handles those details in the provider:
 - It sends DeepSeek `thinking.type` and `reasoning_effort`.
 - It preserves `reasoning_content` on assistant tool-call messages.
 - It skips llama.cpp-only and ignored thinking-mode parameters for DeepSeek.
+
+## Reasoning And Output Budgets
+
+The controls have separate jobs:
+
+- `thinkingMode` selects the reasoning profile.
+- `reasoningBudget` is a local hidden-reasoning cap, not the answer length.
+- `localDefaultMaxOutputTokens` and `deepSeekDefaultMaxOutputTokens` are normal
+  `max_tokens` values when VS Code does not request an explicit limit.
+- `maxOutputTokensCap` is the final safety ceiling.
+
+For local llama.cpp requests, Light uses up to 512 hidden tokens, Balanced up
+to 2048, and Deep/Auto use `reasoningBudget`. The extension sends
+`chat_template_kwargs.enable_thinking` and `thinking_budget_tokens`, which are
+recognized by the maintained llama.cpp server fork. `max_tokens` includes both
+hidden reasoning and visible output, so it must remain larger than the reasoning
+cap.
+
+DeepSeek does not consume the numeric local budget. It receives High effort for
+Auto/Light/Balanced and Max effort for Deep. See
+[Tokens, Reasoning, And Prompt Cache](docs/TOKENS_REASONING_CACHE.md) for the
+complete mapping, recommended profiles, and cache diagnostics.
 
 ## Context Management
 
@@ -273,12 +303,13 @@ Set `maxToolResultChars = 0` only when you explicitly need raw full tool output.
 
 ## Shared Memory
 
-Version `0.3.0` adds durable memory owned by this extension. It is stored once
+Durable memory is owned by this extension. It is stored once
 in VS Code extension global storage and is therefore shared by local models,
 DeepSeek, chats, and workspaces on the same VS Code profile.
 
-Relevant entries are automatically added to the system context with a separate
-budget:
+Relevant entries are automatically added immediately before the latest user
+turn with a separate budget. This preserves the stable conversation prefix for
+llama.cpp prompt-cache reuse:
 
 ```json
 {
@@ -343,7 +374,7 @@ The sidebar keeps frequent actions in the view title:
 The tree itself is split into four stable groups:
 
 - `Connections`: primary/local endpoints, source toggles, and API setup;
-- `Model Behavior`: global thinking default, reasoning budget, and tool modes;
+- `Model Behavior`: global thinking default, local reasoning cap, and tool modes;
 - `Memory`: shared memory state and destructive clear action;
 - `Diagnostics`: context/throughput metrics, logs, logging, and status bar
   toggles.
@@ -365,7 +396,7 @@ endpoint URLs are available as tooltips instead of stretching the sidebar.
 - `Local LLM: Open Shared Memory`
 - `Local LLM: Clear Shared Memory`
 - `Local LLM: Set Thinking Mode`
-- `Local LLM: Set Reasoning Budget`
+- `Local LLM: Set Local Reasoning Cap`
 - `Local LLM: Set Tool Result Mode`
 - `Local LLM: Set Tool Calling Mode`
 - `Local LLM: Refresh Models`
@@ -399,6 +430,8 @@ Context and output:
 - `llamacpp.compactKeepLastTurns`
 - `llamacpp.hardCompactKeepLastTurns`
 - `llamacpp.maxOutputTokensCap`
+- `llamacpp.localDefaultMaxOutputTokens`
+- `llamacpp.deepSeekDefaultMaxOutputTokens`
 - `llamacpp.minReplyReserveTokens`
 
 Tools:
@@ -406,6 +439,7 @@ Tools:
 - `llamacpp.toolCallingMode`
 - `llamacpp.apiDirectMaxTools`
 - `llamacpp.apiDirectIncludeAllTools`
+- `llamacpp.apiDirectToolTokenBudget`
 - `llamacpp.maxToolsPerRequest`
 - `llamacpp.toolResultMode`
 - `llamacpp.maxToolResultChars`
@@ -460,16 +494,22 @@ Run tests:
 npm test
 ```
 
+Run all checks:
+
+```sh
+npm run check
+```
+
 Package a local VSIX:
 
 ```sh
-npx @vscode/vsce package
+npm run package
 ```
 
 Install the local VSIX:
 
 ```sh
-code --install-extension .\llama-vscode-chat-0.6.0.vsix --force
+code --install-extension .\llama-vscode-chat-1.0.0.vsix --force
 ```
 
 After installing, run `Developer: Reload Window` in VS Code.

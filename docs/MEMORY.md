@@ -47,9 +47,11 @@ messages. Entries are ranked by:
 - content matches;
 - most recent update time as a tie-breaker.
 
-Only selected entries are injected. `llamacpp.memoryMaxTokens` caps their total
-estimated context cost; the default is 4096 tokens. Pinned entries have search
-priority but still respect the same hard budget.
+Only selected entries are injected immediately before the latest user request.
+This keeps the older system and conversation prefix stable for llama.cpp prompt
+caching. `llamacpp.memoryMaxTokens` caps their total estimated context cost; the
+default is 4096 tokens. Pinned entries have search priority but still respect
+the same hard budget.
 
 ## Agent Tools
 
@@ -74,9 +76,9 @@ entirely of pinned entries rejects additional entries.
 
 ## Safety Model
 
-Memory is treated as untrusted reference context. The injected system text tells
-the model not to execute instructions found inside entries unless the current
-user request independently asks for the same action. This reduces stale or
+Memory is treated as untrusted reference context. Its dedicated user message
+tells the model not to execute instructions found inside entries unless the
+current request independently asks for the same action. This reduces stale or
 malicious memory from overriding the live task, but users should still avoid
 storing secrets, executable instructions, and unverified claims.
 

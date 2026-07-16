@@ -28,6 +28,8 @@ repository metadata, documentation, and release artifacts belong to the fork.
   endpoint; there is no intermediate model proxy.
 - llama.cpp receives compatible prompt-cache, reasoning, sampling, and tool
   fields.
+- Normal local and DeepSeek output defaults are separate from the global hard
+  ceiling, avoiding oversized reservation on ordinary turns.
 - DeepSeek receives its own thinking and reasoning profile and never receives
   llama.cpp-only `cache_prompt`.
 - Tool-result and tool-call compatibility retries are bounded and logged.
@@ -42,6 +44,8 @@ repository metadata, documentation, and release artifacts belong to the fork.
   consume the context window.
 - Exact streamed token usage is forwarded to Copilot Session Info when the
   server provides it; a local estimate is used otherwise.
+- llama.cpp and DeepSeek cache-hit counters are normalized and shown in Quick
+  Access diagnostics.
 
 ### Reasoning And Streaming
 
@@ -57,8 +61,8 @@ repository metadata, documentation, and release artifacts belong to the fork.
 
 - Durable memory is stored once in extension global storage and is shared by
   local models, DeepSeek, workspaces, and chats in the same VS Code profile.
-- Relevant entries can be injected automatically within a separate token
-  budget.
+- Relevant entries are injected near the latest user turn within a separate
+  token budget, preserving the reusable prompt prefix.
 - Agent tools can store, search, and delete entries with confirmation for
   mutating operations.
 - The JSON store remains inspectable and editable by the user.
@@ -86,16 +90,17 @@ repository metadata, documentation, and release artifacts belong to the fork.
 
 | Area | Main code |
 | --- | --- |
-| Composition and commands | `src/extension.ts` |
-| Source routing and request lifecycle | `src/llama-provider.ts` |
+| Composition | `src/extension.ts` |
+| Request lifecycle | `src/llama-provider.ts` |
+| Source ids and routing | `src/model-sources/` |
 | SSE, text, thinking, and tool parsing | `src/base-provider.ts` |
 | Context budgets and native usage | `src/context/` |
 | Local and DeepSeek request profiles | `src/request/` |
 | Serial request admission | `src/transport/` |
 | Shared memory | `src/memory/` |
 | Reasoning profiles | `src/reasoning.ts` |
-| Quick Access | `src/ui/quick-access.ts` |
+| Quick Access and behavior commands | `src/ui/` |
 | Copilot bundle patch tooling | `scripts/patch-copilot-chat.mjs` |
 
-The remaining refactoring plan is tracked in [Project Audit](AUDIT.md), while
+The completed 1.0 audit is tracked in [Project Audit](AUDIT.md), while
 [Architecture](ARCHITECTURE.md) describes the runtime flow and invariants.
