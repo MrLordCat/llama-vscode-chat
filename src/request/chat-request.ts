@@ -63,10 +63,10 @@ export function buildChatCompletionRequest(
 		}
 	} else {
 		request.cache_prompt = input.cachePrompt;
-		request.reasoning_budget = input.reasoningBudget;
-		request.reasoning = {
-			budget_tokens: input.reasoningBudget,
+		request.chat_template_kwargs = {
+			enable_thinking: input.thinkingMode !== "off",
 		};
+		request.thinking_budget_tokens = input.reasoningBudget;
 	}
 
 	if (input.tools) {

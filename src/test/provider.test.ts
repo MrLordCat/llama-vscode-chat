@@ -1276,6 +1276,40 @@ suite("Llama.cpp Chat Provider Extension", () => {
             assert.equal((out.tools ?? []).length, 3);
         });
 
+		test("convertTools apiDirect subset never expands past the efficient default", () => {
+			const tools = Array.from({ length: 70 }, (_, index) => ({
+				name: `tool_${index}`,
+				description: "Utility tool",
+				inputSchema: { type: "object", properties: {} },
+			}));
+			const out = convertTools(
+				{ toolMode: vscode.LanguageModelChatToolMode.Auto, tools } satisfies vscode.ProvideLanguageModelChatResponseOptions,
+				{ mode: "apiDirect", apiDirectIncludeAllTools: false, apiDirectMaxTools: 128 }
+			);
+
+			assert.equal((out.tools ?? []).length, 48);
+		});
+
+		test("convertTools apiDirect respects the approximate schema token budget", () => {
+			const tools = Array.from({ length: 12 }, (_, index) => ({
+				name: `verbose_tool_${index}`,
+				description: "Verbose utility tool ".repeat(20),
+				inputSchema: {
+					type: "object",
+					properties: {
+						payload: { type: "string", description: "Detailed payload field ".repeat(20) },
+					},
+				},
+			}));
+			const out = convertTools(
+				{ toolMode: vscode.LanguageModelChatToolMode.Auto, tools } satisfies vscode.ProvideLanguageModelChatResponseOptions,
+				{ mode: "apiDirect", apiDirectIncludeAllTools: true, apiDirectMaxTools: 12, apiDirectToolTokenBudget: 256 }
+			);
+
+			assert.ok((out.tools ?? []).length >= 1);
+			assert.ok((out.tools ?? []).length < tools.length);
+		});
+
 		test("convertTools apiDirect prioritizes shared memory tools", () => {
 			const out = convertTools(
 				{

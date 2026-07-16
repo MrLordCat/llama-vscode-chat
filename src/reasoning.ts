@@ -39,18 +39,19 @@ export function resolveRequestThinkingMode(
 }
 
 export function resolveReasoningBudget(mode: ThinkingMode, configuredBudget: number): number {
+	const normalizedBudget = Number.isFinite(configuredBudget) ? configuredBudget : 8192;
+	const cap = Math.max(256, Math.min(65536, Math.floor(normalizedBudget)));
 	switch (mode) {
 		case "off":
 			return 0;
 		case "light":
-			return 512;
+			return Math.min(512, cap);
 		case "balanced":
-			return 2048;
+			return Math.min(2048, cap);
 		case "deep":
-			return 8192;
 		case "auto":
 		default:
-			return configuredBudget;
+			return cap;
 	}
 }
 

@@ -35,7 +35,10 @@ suite("reasoning", () => {
 	test("maps modes to local budgets and DeepSeek effort", () => {
 		assert.strictEqual(resolveReasoningBudget("off", 4096), 0);
 		assert.strictEqual(resolveReasoningBudget("auto", 4096), 4096);
-		assert.strictEqual(resolveReasoningBudget("deep", 4096), 8192);
+		assert.strictEqual(resolveReasoningBudget("deep", 4096), 4096);
+		assert.strictEqual(resolveReasoningBudget("balanced", 1024), 1024);
+		assert.strictEqual(resolveReasoningBudget("light", 8192), 512);
+		assert.strictEqual(resolveReasoningBudget("auto", Number.NaN), 8192);
 		assert.strictEqual(toDeepSeekReasoningEffort("off"), undefined);
 		assert.strictEqual(toDeepSeekReasoningEffort("balanced"), "high");
 		assert.strictEqual(toDeepSeekReasoningEffort("deep"), "max");

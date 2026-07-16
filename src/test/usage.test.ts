@@ -1,5 +1,5 @@
 import * as assert from "assert";
-import { estimateChatTokenUsage, normalizeChatTokenUsage } from "../context/usage";
+import { calculatePromptCacheUsage, estimateChatTokenUsage, normalizeChatTokenUsage } from "../context/usage";
 
 suite("chat token usage", () => {
 	test("normalizes server usage and cached prompt tokens", () => {
@@ -19,6 +19,24 @@ suite("chat token usage", () => {
 	test("rejects incomplete usage objects", () => {
 		assert.strictEqual(normalizeChatTokenUsage({ prompt_tokens: 10 }), undefined);
 		assert.strictEqual(normalizeChatTokenUsage(null), undefined);
+	});
+
+	test("normalizes DeepSeek cache counters and calculates the hit rate", () => {
+		const usage = normalizeChatTokenUsage({
+			prompt_tokens: 100,
+			completion_tokens: 20,
+			total_tokens: 120,
+			prompt_cache_hit_tokens: 75,
+			prompt_cache_miss_tokens: 25,
+		});
+
+		assert.deepStrictEqual(usage?.prompt_tokens_details, { cached_tokens: 75 });
+		assert.deepStrictEqual(usage && calculatePromptCacheUsage(usage), {
+			promptTokens: 100,
+			cachedTokens: 75,
+			uncachedTokens: 25,
+			hitPercent: 75,
+		});
 	});
 
 	test("estimates completion usage when the server omits it", () => {

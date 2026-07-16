@@ -46,7 +46,8 @@ suite("quick access", () => {
 		const provider = new LlamaQuickActionsProvider(
 			() => "24.5 tok/s",
 			() => ({ summary: "61.0%", breakdown: "msg 20K + tools 2K + reserved 8K" }),
-			() => 0
+			() => 0,
+			() => "75.0% (75/100)"
 		);
 		const diagnostics = (await getItems(provider)).find(item => labelOf(item) === "Diagnostics");
 		assert.ok(diagnostics);
@@ -54,6 +55,7 @@ suite("quick access", () => {
 		const children = await getItems(provider, diagnostics);
 		assert.ok(children.some(item => labelOf(item) === "Throughput"));
 		assert.ok(children.some(item => labelOf(item) === "Context Usage"));
+		assert.strictEqual(children.find(item => labelOf(item) === "Prompt Cache")?.description, "75.0% (75/100)");
 		assert.ok(!children.some(item => labelOf(item) === "Context Breakdown"));
 		assert.strictEqual(
 			children.find(item => labelOf(item) === "Context Usage")?.tooltip,

@@ -212,6 +212,7 @@ export interface ConvertToolsOptions {
 	mode?: ToolCallingMode;
 	apiDirectMaxTools?: number;
 	apiDirectIncludeAllTools?: boolean;
+	apiDirectToolTokenBudget?: number;
 }
 
 /**
@@ -495,6 +496,9 @@ export function convertTools(
 		? Math.max(1, Math.min(128, convertOptions?.apiDirectMaxTools as number))
 		: 128;
 	const apiDirectIncludeAllTools = convertOptions?.apiDirectIncludeAllTools === true;
+	const apiDirectToolTokenBudget = Number.isInteger(convertOptions?.apiDirectToolTokenBudget)
+		? Math.max(256, Math.min(65536, convertOptions?.apiDirectToolTokenBudget as number))
+		: 12000;
 
 	const requiredMode = options.toolMode === vscode.LanguageModelChatToolMode.Required;
 	const hasRunInTerminal = tools.some((t) => sanitizeFunctionName((t as { name?: string } | undefined)?.name) === "run_in_terminal");
@@ -613,16 +617,13 @@ export function convertTools(
 			return effectiveTools;
 		}
 
-		if (apiDirectIncludeAllTools) {
-			// Keep broad coverage, but still prioritize high-signal execution tools
-			// so critical terminal tools are not dropped when request-level caps apply.
-			return sortToolsByPriority(effectiveTools).slice(0, apiDirectMaxTools);
-		}
-
-		return sortToolsByPriority(effectiveTools).slice(0, apiDirectMaxTools);
+		const countLimit = apiDirectIncludeAllTools
+			? apiDirectMaxTools
+			: Math.min(apiDirectMaxTools, 48);
+		return sortToolsByPriority(effectiveTools).slice(0, countLimit);
 	})();
 
-	const toolDefs: OpenAIFunctionToolDef[] = selectedTools.map((t) => {
+	const unbudgetedToolDefs: OpenAIFunctionToolDef[] = selectedTools.map((t) => {
 			const name = sanitizeFunctionName(t.name);
 			const descriptionBase = typeof t.description === "string" ? t.description : "";
 			const description = normalizeDescriptionForMode(
@@ -642,6 +643,23 @@ export function convertTools(
 				},
 			} satisfies OpenAIFunctionToolDef;
 		});
+	const toolDefs = (() => {
+		if (mode !== "apiDirect" || requiredMode) {
+			return unbudgetedToolDefs;
+		}
+
+		const selected: OpenAIFunctionToolDef[] = [];
+		let estimatedTokens = 0;
+		for (const definition of unbudgetedToolDefs) {
+			const definitionTokens = Math.max(1, Math.ceil(JSON.stringify(definition).length / 4));
+			if (selected.length > 0 && estimatedTokens + definitionTokens > apiDirectToolTokenBudget) {
+				continue;
+			}
+			selected.push(definition);
+			estimatedTokens += definitionTokens;
+		}
+		return selected;
+	})();
 
 	let tool_choice: "auto" | { type: "function"; function: { name: string } } = "auto";
 	if (requiredMode) {

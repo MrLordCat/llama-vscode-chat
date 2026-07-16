@@ -186,6 +186,20 @@
 					"maximum": 393216,
 					"description": "Hard cap for max_tokens sent to server. Set to 393216 for maximum DeepSeek V4 output."
 				},
+				"llamacpp.localDefaultMaxOutputTokens": {
+					"type": "number",
+					"default": 32768,
+					"minimum": 1024,
+					"maximum": 131072,
+					"description": "Default max_tokens requested for local models when the chat session does not provide an explicit limit. The global maxOutputTokensCap remains the hard ceiling."
+				},
+				"llamacpp.deepSeekDefaultMaxOutputTokens": {
+					"type": "number",
+					"default": 65536,
+					"minimum": 1024,
+					"maximum": 393216,
+					"description": "Default max_tokens requested from DeepSeek when the chat session does not provide an explicit limit. Keeps normal turns below the 393216-token emergency ceiling."
+				},
 				"llamacpp.minReplyReserveTokens": {
 					"type": "number",
 					"default": 1536,
@@ -247,15 +261,22 @@
 				},
 				"llamacpp.apiDirectMaxTools": {
 					"type": "number",
-					"default": 128,
+					"default": 48,
 					"minimum": 1,
 					"maximum": 128,
 					"description": "Maximum number of prioritized tools included when toolCallingMode=apiDirect."
 				},
 				"llamacpp.apiDirectIncludeAllTools": {
 					"type": "boolean",
-					"default": true,
+					"default": false,
 					"description": "When toolCallingMode=apiDirect, include all advertised tools (up to apiDirectMaxTools) instead of prioritized subset."
+				},
+				"llamacpp.apiDirectToolTokenBudget": {
+					"type": "number",
+					"default": 12000,
+					"minimum": 256,
+					"maximum": 65536,
+					"description": "Approximate token ceiling for compact apiDirect tool definitions. High-priority tools are kept first."
 				},
 				"llamacpp.thinkingMode": {
 					"type": "string",
@@ -271,10 +292,10 @@
 				},
 				"llamacpp.reasoningBudget": {
 					"type": "number",
-					"default": 2048,
-					"minimum": 0,
+					"default": 8192,
+					"minimum": 256,
 					"maximum": 65536,
-					"description": "Reasoning budget in tokens sent as reasoning_budget to compatible servers."
+					"description": "Maximum hidden reasoning tokens for compatible local servers. light uses up to 512, balanced up to 2048, and deep/auto use this cap. DeepSeek uses high/max effort instead of this numeric value."
 				},
 				"llamacpp.toolResultMode": {
 					"type": "string",

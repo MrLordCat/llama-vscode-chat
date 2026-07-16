@@ -36,11 +36,26 @@ suite("chat request profiles", () => {
 			top_p: 0.9,
 			top_k: 40,
 			cache_prompt: true,
-			reasoning_budget: 2048,
-			reasoning: { budget_tokens: 2048 },
+			chat_template_kwargs: { enable_thinking: true },
+			thinking_budget_tokens: 2048,
 			tools,
 			tool_choice: "auto",
 		});
+	});
+
+	test("disables local thinking explicitly", () => {
+		const request = buildChatCompletionRequest({
+			model: "qwen-local",
+			family: "qwen",
+			maxTokens: 4096,
+			temperature: 0.7,
+			cachePrompt: true,
+			thinkingMode: "off",
+			reasoningBudget: 0,
+		});
+
+		assert.deepStrictEqual(request.chat_template_kwargs, { enable_thinking: false });
+		assert.strictEqual(request.thinking_budget_tokens, 0);
 	});
 
 	test("omits unsupported sampling and tool choice in DeepSeek thinking mode", () => {

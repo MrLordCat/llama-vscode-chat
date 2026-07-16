@@ -69,16 +69,20 @@ suite("Shared memory", () => {
 		assert.ok(context!.text.length <= 512);
 	});
 
-	test("merges shared memory into the existing system message", () => {
+	test("injects shared memory near the latest user turn to preserve the cached prefix", () => {
 		const messages: OpenAIChatMessage[] = [
 			{ role: "system", content: "Base instructions" },
+			{ role: "user", content: "Earlier request" },
+			{ role: "assistant", content: "Earlier answer" },
 			{ role: "user", content: "Work on the local provider" },
 		];
 		const injected = injectSharedMemoryContext(messages, "- Preferred model: Qwen");
 
-		assert.strictEqual(injected.length, 2);
-		assert.match(String(injected[0].content), /Base instructions/);
-		assert.match(String(injected[0].content), /Preferred model: Qwen/);
+		assert.strictEqual(injected.length, 5);
+		assert.deepStrictEqual(injected.slice(0, 3), messages.slice(0, 3));
+		assert.strictEqual(injected[3].role, "user");
+		assert.match(String(injected[3].content), /Preferred model: Qwen/);
+		assert.strictEqual(injected[4].content, "Work on the local provider");
 		assert.strictEqual(messages[0].content, "Base instructions");
 	});
 

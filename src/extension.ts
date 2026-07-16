@@ -19,11 +19,8 @@ import {
 import { LlamaLogService } from "./logger";
 import { SharedMemoryService } from "./memory/shared-memory-service";
 import { registerMemoryTools } from "./memory/tools";
-import type { ThinkingMode } from "./reasoning";
+import { registerModelBehaviorCommands } from "./ui/model-behavior-commands";
 import { LlamaQuickActionsProvider } from "./ui/quick-access";
-
-type ToolResultMode = "auto" | "tool" | "user";
-type ToolCallingMode = "classic" | "apiDirect";
 
 interface ContextUsageDisplay {
 	summary: string;
@@ -91,96 +88,6 @@ function getExplicitConfiguredServerUrl(config: vscode.WorkspaceConfiguration): 
 	return undefined;
 }
 
-async function pickThinkingMode(current: ThinkingMode): Promise<ThinkingMode | undefined> {
-	const options: Array<{ label: string; description: string; value: ThinkingMode }> = [
-		{ label: "Auto", description: "Use configured reasoning budget", value: "auto" },
-		{ label: "Off", description: "Disable chain-of-thought budget", value: "off" },
-		{ label: "Light", description: "Fast/short reasoning", value: "light" },
-		{ label: "Balanced", description: "Balanced quality and speed", value: "balanced" },
-		{ label: "Deep", description: "Maximum reasoning depth", value: "deep" },
-	];
-
-	const picked = await vscode.window.showQuickPick(
-		options.map(option => ({
-			label: option.label,
-			description: option.description,
-			detail: option.value === current ? "Current" : undefined,
-			value: option.value,
-		})),
-		{
-			title: "Local LLM Thinking Mode",
-			ignoreFocusOut: true,
-		}
-	);
-
-	return picked?.value;
-}
-
-async function pickToolResultMode(current: ToolResultMode): Promise<ToolResultMode | undefined> {
-	const options: Array<{ label: string; description: string; value: ToolResultMode }> = [
-		{
-			label: "Auto",
-			description: "Prefer tool role, fallback to user-style results when template rejects tool role",
-			value: "auto",
-		},
-		{
-			label: "Tool",
-			description: "Always send tool results as role=tool with tool_call_id",
-			value: "tool",
-		},
-		{
-			label: "User",
-			description: "Always flatten tool results into user text (maximum compatibility)",
-			value: "user",
-		},
-	];
-
-	const picked = await vscode.window.showQuickPick(
-		options.map(option => ({
-			label: option.label,
-			description: option.description,
-			detail: option.value === current ? "Current" : undefined,
-			value: option.value,
-		})),
-		{
-			title: "Local LLM Tool Result Mode",
-			ignoreFocusOut: true,
-		}
-	);
-
-	return picked?.value;
-}
-
-async function pickToolCallingMode(current: ToolCallingMode): Promise<ToolCallingMode | undefined> {
-	const options: Array<{ label: string; description: string; value: ToolCallingMode }> = [
-		{
-			label: "Classic",
-			description: "Send the full tool catalog (existing behavior)",
-			value: "classic",
-		},
-		{
-			label: "API Direct",
-			description: "Send compact prioritized tool definitions to reduce token overhead",
-			value: "apiDirect",
-		},
-	];
-
-	const picked = await vscode.window.showQuickPick(
-		options.map(option => ({
-			label: option.label,
-			description: option.description,
-			detail: option.value === current ? "Current" : undefined,
-			value: option.value,
-		})),
-		{
-			title: "Local LLM Tool Calling Mode",
-			ignoreFocusOut: true,
-		}
-	);
-
-	return picked?.value;
-}
-
 async function openLlamaSidebar(): Promise<boolean> {
 	try {
 		await vscode.commands.executeCommand("llamacpp-quick-actions.focus");
@@ -245,14 +152,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const llamaProvider = new LlamaCppChatModelProvider(context.secrets, ua, logService, memoryService);
 	context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider(PROVIDER_VENDOR, llamaProvider));
 	let lastThroughput: string | undefined;
+	let lastPromptCache: string | undefined;
 	let lastContextUsage: ContextUsageDisplay | undefined;
 	const quickActionsProvider = new LlamaQuickActionsProvider(
 		() => lastThroughput,
 		() => lastContextUsage,
-		() => memoryService.count
+		() => memoryService.count,
+		() => lastPromptCache
 	);
 	context.subscriptions.push(vscode.window.registerTreeDataProvider("llamacpp-quick-actions", quickActionsProvider));
 	context.subscriptions.push(memoryService.onDidChange(() => quickActionsProvider.refresh()));
+	context.subscriptions.push(...registerModelBehaviorCommands(() => quickActionsProvider.refresh()));
 	llamaProvider.refreshLanguageModelChatInformation();
 
 	const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 95);
@@ -302,6 +212,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			const tpsText = metrics.tokensPerSecond === undefined ? "n/a" : `${metrics.tokensPerSecond.toFixed(1)} tok/s`;
 			const latencyText = metrics.firstTokenLatencyMs === undefined ? "n/a" : `${metrics.firstTokenLatencyMs} ms`;
 			const queueText = `${metrics.queueWaitMs} ms`;
+			const cacheText = metrics.cachedPromptTokens === undefined
+				? "n/a"
+				: `${metrics.promptCacheHitPercent?.toFixed(1) ?? "0.0"}% (${formatNumber(metrics.cachedPromptTokens)}/${formatNumber(metrics.promptTokens)})`;
 			const performanceTooltipLines = [
 				`Model: ${metrics.modelId}`,
 				`TPS: ${tpsText}`,
@@ -309,6 +222,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				`Thinking chars: ${metrics.thinkingChars}`,
 				`First token latency: ${latencyText}`,
 				`Queue wait: ${queueText}`,
+				`Prompt cache: ${cacheText}`,
 				`Turn duration: ${metrics.durationMs} ms`,
 			];
 			if (lastContextUsage) {
@@ -316,6 +230,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			}
 
 			lastThroughput = tpsText;
+			lastPromptCache = cacheText;
 			performanceStatusBar.text = `$(dashboard) local LLM ${tpsText}`;
 			performanceStatusBar.tooltip = performanceTooltipLines.join("\n");
 			quickActionsProvider.refresh();
@@ -459,8 +374,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			await config.update("maxOutputTokensCap", DEEPSEEK_MAX_OUTPUT_TOKENS, vscode.ConfigurationTarget.Global);
 			await config.update("thinkingMode", "deep", vscode.ConfigurationTarget.Global);
 			await config.update("toolCallingMode", "apiDirect", vscode.ConfigurationTarget.Global);
-			await config.update("apiDirectMaxTools", 128, vscode.ConfigurationTarget.Global);
-			await config.update("apiDirectIncludeAllTools", true, vscode.ConfigurationTarget.Global);
+			await config.update("apiDirectMaxTools", 48, vscode.ConfigurationTarget.Global);
+			await config.update("apiDirectIncludeAllTools", false, vscode.ConfigurationTarget.Global);
+			await config.update("apiDirectToolTokenBudget", 12000, vscode.ConfigurationTarget.Global);
+			await config.update("deepSeekDefaultMaxOutputTokens", 65536, vscode.ConfigurationTarget.Global);
+			await config.update("reasoningBudget", 8192, vscode.ConfigurationTarget.Global);
 			await config.update("toolResultMode", "auto", vscode.ConfigurationTarget.Global);
 			await config.update("autoCompact", true, vscode.ConfigurationTarget.Global);
 			await config.update("retryOnContextOverflow", true, vscode.ConfigurationTarget.Global);
@@ -550,84 +468,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				const message = error instanceof Error ? error.message : String(error);
 				vscode.window.showErrorMessage(`Unable to reload shared memory: ${message}`);
 			}
-		})
-	);
-
-	context.subscriptions.push(
-		vscode.commands.registerCommand("llamacpp.setThinkingMode", async () => {
-			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
-			const current = (String(config.get("thinkingMode", "auto")) as ThinkingMode) ?? "auto";
-			const next = await pickThinkingMode(current);
-			if (!next) {
-				return;
-			}
-
-			await config.update("thinkingMode", next, vscode.ConfigurationTarget.Global);
-			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage(`Local LLM thinking mode: ${next}`);
-		})
-	);
-
-	context.subscriptions.push(
-		vscode.commands.registerCommand("llamacpp.setReasoningBudget", async () => {
-			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
-			const current = Number(config.get("reasoningBudget", 2048));
-
-			const value = await vscode.window.showInputBox({
-				title: "Local LLM Reasoning Budget",
-				prompt: "Set reasoning budget in tokens (0 disables thinking budget)",
-				value: Number.isFinite(current) ? String(current) : "2048",
-				ignoreFocusOut: true,
-				validateInput: input => {
-					if (!/^\d+$/.test(input.trim())) {
-						return "Enter a whole number from 0 to 65536";
-					}
-					const parsed = Number(input);
-					if (!Number.isFinite(parsed) || parsed < 0 || parsed > 65536) {
-						return "Value must be between 0 and 65536";
-					}
-					return undefined;
-				},
-			});
-
-			if (value === undefined) {
-				return;
-			}
-
-			const parsed = Math.max(0, Math.min(65536, Number(value)));
-			await config.update("reasoningBudget", parsed, vscode.ConfigurationTarget.Global);
-			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage(`Local LLM reasoning budget: ${parsed}`);
-		})
-	);
-
-	context.subscriptions.push(
-		vscode.commands.registerCommand("llamacpp.setToolResultMode", async () => {
-			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
-			const current = (String(config.get("toolResultMode", "auto")) as ToolResultMode) ?? "auto";
-			const next = await pickToolResultMode(current);
-			if (!next) {
-				return;
-			}
-
-			await config.update("toolResultMode", next, vscode.ConfigurationTarget.Global);
-			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage(`Local LLM tool result mode: ${next}`);
-		})
-	);
-
-	context.subscriptions.push(
-		vscode.commands.registerCommand("llamacpp.setToolCallingMode", async () => {
-			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
-			const current = (String(config.get("toolCallingMode", "classic")) as ToolCallingMode) ?? "classic";
-			const next = await pickToolCallingMode(current);
-			if (!next) {
-				return;
-			}
-
-			await config.update("toolCallingMode", next, vscode.ConfigurationTarget.Global);
-			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage(`Local LLM tool calling mode: ${next}`);
 		})
 	);
 

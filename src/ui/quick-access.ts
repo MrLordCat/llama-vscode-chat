@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 
 import { CONFIG_SECTION, DEFAULT_SERVER_URL } from "../constants";
+import { normalizeThinkingMode, resolveReasoningBudget } from "../reasoning";
 
 export interface QuickAccessContextUsage {
 	summary: string;
@@ -66,7 +67,8 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 	constructor(
 		private readonly getLastThroughput: () => string | undefined,
 		private readonly getLastContextUsage: () => QuickAccessContextUsage | undefined,
-		private readonly getMemoryCount: () => number
+		private readonly getMemoryCount: () => number,
+		private readonly getLastPromptCache: () => string | undefined = () => undefined
 	) {}
 
 	refresh(): void {
@@ -91,7 +93,11 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 		const localServerEnabled = config.get<boolean>("enableLocalServer", true) !== false;
 		const deepSeekEnabled = config.get<boolean>("enableDeepSeek", true) !== false;
 		const thinkingMode = String(config.get("thinkingMode", "auto"));
-		const reasoningBudget = Number(config.get("reasoningBudget", 2048));
+		const reasoningBudget = Number(config.get("reasoningBudget", 8192));
+		const effectiveReasoningBudget = resolveReasoningBudget(
+			normalizeThinkingMode(thinkingMode),
+			Number.isFinite(reasoningBudget) ? reasoningBudget : 8192
+		);
 		const toolResultMode = String(config.get("toolResultMode", "auto"));
 		const toolCallingMode = String(config.get("toolCallingMode", "classic"));
 		const fileLoggingEnabled = config.get<boolean>("enableFileLogging", true) !== false;
@@ -102,6 +108,7 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 		const memoryCount = this.getMemoryCount();
 		const lastThroughput = this.getLastThroughput();
 		const lastContextUsage = this.getLastContextUsage();
+		const lastPromptCache = this.getLastPromptCache();
 
 		const connections = new QuickAccessItem("connections", "Connections", {
 			description: `Local ${localServerEnabled ? "on" : "off"} · DeepSeek ${deepSeekEnabled ? "on" : "off"}`,
@@ -155,8 +162,9 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 					icon: new vscode.ThemeIcon("lightbulb"),
 					command: command("llamacpp.setThinkingMode", "Set Thinking Mode"),
 				}),
-				new QuickAccessItem("modelBehavior.reasoningBudget", "Reasoning Budget", {
-					description: Number.isFinite(reasoningBudget) ? String(reasoningBudget) : "auto",
+			new QuickAccessItem("modelBehavior.reasoningBudget", "Local Reasoning Cap", {
+				description: `${effectiveReasoningBudget} tokens`,
+				tooltip: "Maximum hidden reasoning tokens for local models. Light uses up to 512, Balanced up to 2048, Deep/Auto use this cap. DeepSeek uses High/Max effort instead.",
 					icon: new vscode.ThemeIcon("symbol-numeric"),
 					command: command("llamacpp.setReasoningBudget", "Set Reasoning Budget"),
 				}),
@@ -207,6 +215,12 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 					description: lastContextUsage?.summary ?? "n/a",
 					tooltip: lastContextUsage?.breakdown,
 					icon: new vscode.ThemeIcon("pie-chart"),
+					command: command("llamacpp.openLatestLog", "Open Latest Log"),
+				}),
+				new QuickAccessItem("diagnostics.promptCache", "Prompt Cache", {
+					description: lastPromptCache ?? "n/a",
+					tooltip: "Cached prompt tokens reported by the selected server for the last completed turn",
+					icon: new vscode.ThemeIcon("database"),
 					command: command("llamacpp.openLatestLog", "Open Latest Log"),
 				}),
 				new QuickAccessItem("diagnostics.latestLog", "Latest Log", {

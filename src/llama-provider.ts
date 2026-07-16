@@ -17,15 +17,25 @@ import {
     CONFIG_SECTION,
     DEEPSEEK_CONTEXT_LENGTH,
     DEEPSEEK_MAX_OUTPUT_TOKENS,
-    DEEPSEEK_SERVER_URL,
     DEFAULT_SERVER_URL,
 } from "./constants";
 import { calculateContextBudget, estimateContextUsage } from "./context/context-budget";
-import { estimateChatTokenUsage, type ChatTokenUsage } from "./context/usage";
+import { compactMessages } from "./context/message-compaction";
+import { resolveOutputTokenBudget } from "./context/output-budget";
+import { calculatePromptCacheUsage, estimateChatTokenUsage, type ChatTokenUsage } from "./context/usage";
 import { convertMessages, convertTools, validateRequest, type ToolCallingMode, type ToolResultMode } from "./utils";
 import { LlamaLogSink } from "./logger";
 import { buildMemoryQuery, injectSharedMemoryContext } from "./memory/prompt";
 import type { SharedMemoryContextProvider, SharedMemoryPromptContext } from "./memory/types";
+import {
+    createModelSources,
+    encodeProviderModelId,
+    normalizeServerUrl,
+    parseProviderModelId,
+    resolveModelFamily,
+    type ChatModelSource,
+    type LlamaCppModelInfo,
+} from "./model-sources/source-routing";
 import {
     createReasoningConfigurationSchema,
     resolveReasoningBudget,
@@ -33,39 +43,18 @@ import {
 } from "./reasoning";
 import { buildChatCompletionRequest } from "./request/chat-request";
 import { SerialRequestQueue, type ChatRequestSlotLease } from "./transport/request-queue";
+import {
+    getChatCompletionsEndpoint,
+    getModelsEndpoint,
+    isDeepSeekEndpoint,
+    OpenAIHttpTransport,
+} from "./transport/openai-http";
 import type { OpenAIChatMessage } from "./types";
 
 type ToolResultModeConfig = "auto" | "tool" | "user";
 type ToolCallingModeConfig = "classic" | "apiDirect";
 
 const MAX_CONTEXT_LENGTH = 1048576;
-const MODEL_SOURCE_SEPARATOR = "::";
-
-interface ChatModelSource {
-    key: string;
-    label: string;
-    serverUrl: string;
-    apiKey?: string;
-    familyOverride?: string;
-    contextLengthOverride?: number;
-    contextLengthFallback?: number;
-}
-
-interface LlamaCppModelInfo {
-    id: string;
-    aliases?: string[];
-    contextLength?: number;
-    capabilities?: string[];
-    modalities?: {
-        vision?: boolean;
-        audio?: boolean;
-    };
-    meta?: {
-        n_ctx_train?: number;
-        [key: string]: unknown;
-    };
-}
-
 interface ModelListCacheEntry {
     serverUrl: string;
     apiKeyPresent: boolean;
@@ -97,6 +86,9 @@ export interface LlamaChatTurnMetrics {
     thinkingChars: number;
     estimatedOutputTokens: number;
     tokensPerSecond?: number;
+    promptTokens: number;
+    cachedPromptTokens?: number;
+    promptCacheHitPercent?: number;
     retriedAfterOverflow: boolean;
 }
 
@@ -150,6 +142,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
     private readonly modelListInflight = new Map<string, ModelListInflightEntry>();
     private readonly runtimeContextCache = new Map<string, RuntimeContextCacheEntry>();
     private readonly chatRequestQueue: SerialRequestQueue;
+    private readonly httpTransport = new OpenAIHttpTransport();
 
     /**
      * Creates a new Llama.cpp chat model provider.
@@ -347,8 +340,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
     }
 
     private normalizeServerUrl(url: string): string {
-        const trimmed = url.trim().replace(/\/+$/, "");
-        return trimmed || DEFAULT_SERVER_URL;
+        return normalizeServerUrl(url);
     }
 
     private getExplicitConfiguredServerUrl(): string | undefined {
@@ -403,44 +395,6 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
 
     private getSourceCacheKey(serverUrl: string, apiKeyPresent: boolean): string {
         return `${this.normalizeServerUrl(serverUrl)}|key=${apiKeyPresent ? "1" : "0"}`;
-    }
-
-    private encodeProviderModelId(sourceKey: string, modelId: string): string {
-        return `${sourceKey}${MODEL_SOURCE_SEPARATOR}${modelId}`;
-    }
-
-    private parseProviderModelId(providerModelId: string): { sourceKey?: string; modelId: string } {
-        const separatorIndex = providerModelId.indexOf(MODEL_SOURCE_SEPARATOR);
-        if (separatorIndex <= 0) {
-            return { modelId: providerModelId };
-        }
-        return {
-            sourceKey: providerModelId.slice(0, separatorIndex),
-            modelId: providerModelId.slice(separatorIndex + MODEL_SOURCE_SEPARATOR.length),
-        };
-    }
-
-    private inferModelFamily(modelId: string): string {
-        const lower = modelId.toLowerCase();
-        if (lower.includes("deepseek")) {
-            return "deepseek";
-        }
-        if (lower.includes("qwen")) {
-            return "qwen";
-        }
-        if (lower.includes("mistral") || lower.includes("mixtral")) {
-            return "mistral";
-        }
-        if (lower.includes("gemma")) {
-            return "gemma";
-        }
-        if (lower.includes("phi")) {
-            return "phi";
-        }
-        if (lower.includes("llama")) {
-            return "llama";
-        }
-        return "llama";
     }
 
     private parsePositiveInt(value: unknown): number | undefined {
@@ -633,20 +587,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
     }
 
     private resolveModelFamily(modelId: string, familyOverride?: string): string {
-        if (familyOverride) {
-            const normalized = familyOverride.trim().toLowerCase();
-            if (normalized && normalized !== "auto") {
-                return normalized;
-            }
-            return this.inferModelFamily(modelId);
-        }
-
         const configured = String(this.getConfig().get("modelFamily", "llama") ?? "llama").trim().toLowerCase();
-        if (configured && configured !== "auto") {
-            return configured;
-        }
-
-        return this.inferModelFamily(modelId);
+        return resolveModelFamily(modelId, familyOverride, configured);
     }
 
     private normalizeToolResultMode(value: unknown): ToolResultModeConfig {
@@ -666,26 +608,15 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
     }
 
     private isDeepSeekServer(serverUrl: string): boolean {
-        try {
-            const url = new URL(serverUrl);
-            return url.hostname.toLowerCase().endsWith("deepseek.com");
-        } catch {
-            return false;
-        }
+        return isDeepSeekEndpoint(serverUrl);
     }
 
     private getChatCompletionsEndpoint(serverUrl: string): string {
-        if (this.isDeepSeekServer(serverUrl)) {
-            return `${serverUrl}/chat/completions`;
-        }
-        return `${serverUrl}/v1/chat/completions`;
+        return getChatCompletionsEndpoint(serverUrl);
     }
 
     private getModelsEndpoint(serverUrl: string): string {
-        if (this.isDeepSeekServer(serverUrl)) {
-            return `${serverUrl}/models`;
-        }
-        return `${serverUrl}/v1/models`;
+        return getModelsEndpoint(serverUrl);
     }
 
     private isThinkingResponsePart(part: unknown): boolean {
@@ -843,50 +774,6 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         });
     }
 
-    private contentToText(content: unknown): string {
-        if (typeof content === "string") {
-            return content;
-        }
-        if (Array.isArray(content)) {
-            return content
-                .map(part => {
-                    if (typeof part === "string") {
-                        return part;
-                    }
-                    if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") {
-                        return (part as { text: string }).text;
-                    }
-                    return "";
-                })
-                .join("\n");
-        }
-        return "";
-    }
-
-    private compactSummaryTextForMessage(message: OpenAIChatMessage): string {
-        if (message.role === "tool") {
-            const toolName = typeof message.name === "string" && message.name.trim().length > 0
-                ? message.name.trim()
-                : "tool";
-            const size = typeof message.content === "string" ? message.content.length : 0;
-            return `[tool_result ${toolName}] ${size} chars omitted`;
-        }
-
-        if (message.role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
-            const names = message.tool_calls
-                .map(call => call.function?.name)
-                .filter((name): name is string => typeof name === "string" && name.length > 0);
-            if (names.length > 0) {
-                const shown = names.slice(0, 3).join(", ");
-                const extra = names.length > 3 ? ` +${names.length - 3} more` : "";
-                return `[tool_calls] ${shown}${extra}`;
-            }
-            return `[tool_calls] ${message.tool_calls.length}`;
-        }
-
-        return this.contentToText(message.content);
-    }
-
     private truncateToolResultContent(content: string, maxChars: number): { content: string; truncatedChars: number } {
         if (maxChars <= 0 || content.length <= maxChars) {
             return { content, truncatedChars: 0 };
@@ -990,52 +877,12 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         keepLastCount: number,
         label: string
     ): OpenAIChatMessage[] {
-        if (messages.length <= 2) {
-            return messages;
-        }
-
-        const systems = messages.filter(m => m.role === "system");
-        const nonSystem = messages.filter(m => m.role !== "system");
-
-        if (nonSystem.length === 0) {
-            return systems;
-        }
-
-        const keepLast = Math.min(nonSystem.length, Math.max(1, keepLastCount));
-        const head = nonSystem.slice(0, Math.max(0, nonSystem.length - keepLast));
-        let tail = nonSystem.slice(Math.max(0, nonSystem.length - keepLast));
-
-        const summaryLines: string[] = [];
-        for (const msg of head.slice(-24)) {
-            const text = this.compactSummaryTextForMessage(msg).replace(/\s+/g, " ").trim();
-            if (!text) {
-                continue;
-            }
-            const clipped = text.length > 220 ? `${text.slice(0, 220)}...` : text;
-            summaryLines.push(`- ${msg.role}: ${clipped}`);
-        }
-
-        const summaryText =
-            summaryLines.length > 0
-                ? `${label}:\n${summaryLines.join("\n")}`
-                : `${label}: prior turns were compacted to fit model context.`;
-
-        const compacted: OpenAIChatMessage[] = [...systems, { role: "system", content: summaryText }, ...tail];
-
-        while (this.estimateOpenAiMessageTokens(compacted) > tokenBudget && tail.length > 2) {
-            tail = tail.slice(1);
-            compacted.splice(systems.length + 1, compacted.length - (systems.length + 1), ...tail);
-        }
-
-        if (this.estimateOpenAiMessageTokens(compacted) > tokenBudget) {
-            for (const message of compacted) {
-                if (typeof message.content === "string" && message.content.length > 1200) {
-                    message.content = `${message.content.slice(0, 1200)}...`;
-                }
-            }
-        }
-
-        return compacted;
+        return compactMessages(messages, {
+            tokenBudget,
+            keepLastCount,
+            label,
+            estimateTokens: candidate => this.estimateOpenAiMessageTokens(candidate),
+        });
     }
 
     private isContextOverflowError(status: number, text: string): boolean {
@@ -1059,22 +906,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         timeoutMs: number,
         token: CancellationToken
     ): Promise<Response> {
-        const endpoint = this.getChatCompletionsEndpoint(serverUrl);
-        const controller = new AbortController();
-        const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
-        const onCancel = token.onCancellationRequested(() => controller.abort());
-
-        try {
-            return await fetch(endpoint, {
-                method: "POST",
-                headers,
-                body: JSON.stringify(requestBody),
-                signal: controller.signal,
-            });
-        } finally {
-            clearTimeout(timeoutHandle);
-            onCancel.dispose();
-        }
+        return this.httpTransport.postChatCompletion(serverUrl, headers, requestBody, timeoutMs, token);
     }
 
     private acquireChatRequestSlot(
@@ -1353,59 +1185,22 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         const configuredServerUrl = await this.getServerUrl();
         const apiKey = await this.getApiKey();
         const deepSeekApiKey = await this.getDeepSeekApiKey();
-        const sources: ChatModelSource[] = [];
-        const seenUrls = new Set<string>();
-
-        const addSource = (source: ChatModelSource): void => {
-            const normalizedUrl = this.normalizeServerUrl(source.serverUrl);
-            const urlKey = normalizedUrl.toLowerCase();
-            if (seenUrls.has(urlKey)) {
-                return;
-            }
-            seenUrls.add(urlKey);
-            sources.push({ ...source, serverUrl: normalizedUrl });
-        };
-
-        addSource({
-            key: this.isDeepSeekServer(configuredServerUrl) ? "deepseek" : "primary",
-            label: this.isDeepSeekServer(configuredServerUrl) ? "DeepSeek" : "Primary",
-            serverUrl: configuredServerUrl,
-            apiKey: this.isDeepSeekServer(configuredServerUrl) ? deepSeekApiKey : apiKey,
-            familyOverride: this.isDeepSeekServer(configuredServerUrl) ? "deepseek" : undefined,
-            contextLengthOverride: this.isDeepSeekServer(configuredServerUrl)
-                ? DEEPSEEK_CONTEXT_LENGTH
-                : undefined,
+        return createModelSources({
+            primaryServerUrl: configuredServerUrl,
+            primaryApiKey: apiKey,
+            deepSeekApiKey,
+            localEnabled: cfg.get<boolean>("enableLocalServer", true) !== false,
+            localServerUrl: this.getConfiguredLocalServerUrl(),
+            localContextLength: this.getConfiguredLocalContextLength(),
+            deepSeekEnabled: cfg.get<boolean>("enableDeepSeek", true) !== false,
         });
-
-        if (cfg.get<boolean>("enableLocalServer", true) !== false) {
-            addSource({
-                key: "local",
-                label: "Local",
-                serverUrl: this.getConfiguredLocalServerUrl(),
-                familyOverride: "auto",
-                contextLengthFallback: this.getConfiguredLocalContextLength(),
-            });
-        }
-
-        if (cfg.get<boolean>("enableDeepSeek", true) !== false && deepSeekApiKey) {
-            addSource({
-                key: "deepseek",
-                label: "DeepSeek",
-                serverUrl: DEEPSEEK_SERVER_URL,
-                apiKey: deepSeekApiKey,
-                familyOverride: "deepseek",
-                contextLengthOverride: DEEPSEEK_CONTEXT_LENGTH,
-            });
-        }
-
-        return sources;
     }
 
     private async resolveSourceForModel(model: LanguageModelChatInformation): Promise<{
         source: ChatModelSource;
         modelId: string;
     }> {
-        const parsed = this.parseProviderModelId(model.id);
+        const parsed = parseProviderModelId(model.id);
         const sources = await this.getModelSources();
         const source = parsed.sourceKey
             ? sources.find(candidate => candidate.key === parsed.sourceKey)
@@ -1472,7 +1267,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             );
 
         const info: LanguageModelChatInformation & Record<string, unknown> = {
-            id: this.encodeProviderModelId(source.key, model.id),
+            id: encodeProviderModelId(source.key, model.id),
             name: `${model.id} (${source.label})`,
             tooltip: `Model: ${model.id}\nSource: ${source.label}\nServer: ${source.serverUrl}\nContext: ${contextLength} tokens`,
             detail: `${source.label} / ${family} / ctx ${contextLength}`,
@@ -1618,6 +1413,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         const cfg = this.getConfig();
         const requestId = randomUUID();
         const turnStartedAt = Date.now();
+        const resolvedFamily = this.resolveModelFamily(requestModelId, source.familyOverride);
 
         let firstOutputAt: number | undefined;
         let emittedParts = 0;
@@ -1673,12 +1469,13 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             cfg.get("thinkingMode", "auto"),
             options.modelOptions
         );
-        const configuredReasoningBudget = this.clampInt(cfg.get("reasoningBudget", 2048), 0, 65536, 2048);
+        const configuredReasoningBudget = this.clampInt(cfg.get("reasoningBudget", 8192), 256, 65536, 8192);
         const reasoningBudget = resolveReasoningBudget(thinkingMode, configuredReasoningBudget);
         const toolResultModeConfig = this.normalizeToolResultMode(cfg.get("toolResultMode", "auto"));
         const toolCallingModeConfig = this.normalizeToolCallingMode(cfg.get("toolCallingMode", "apiDirect"));
-        const apiDirectMaxTools = this.clampInt(cfg.get("apiDirectMaxTools", 128), 1, 128, 128);
-        const apiDirectIncludeAllTools = cfg.get<boolean>("apiDirectIncludeAllTools", true) !== false;
+        const apiDirectMaxTools = this.clampInt(cfg.get("apiDirectMaxTools", 48), 1, 128, 48);
+        const apiDirectIncludeAllTools = cfg.get<boolean>("apiDirectIncludeAllTools", false) === true;
+        const apiDirectToolTokenBudget = this.clampInt(cfg.get("apiDirectToolTokenBudget", 12000), 256, 65536, 12000);
         const sharedMemoryEnabled = cfg.get<boolean>("memoryEnabled", true) !== false;
         const sharedMemoryAutoInject = cfg.get<boolean>("memoryAutoInject", true) !== false;
         const sharedMemoryMaxTokens = this.clampInt(cfg.get("memoryMaxTokens", 4096), 128, 32768, 4096);
@@ -1719,6 +1516,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 toolCallingModeConfig,
                 apiDirectMaxTools,
                 apiDirectIncludeAllTools,
+                apiDirectToolTokenBudget,
                 sharedMemoryEnabled,
                 sharedMemoryAutoInject,
                 sharedMemoryMaxTokens,
@@ -1736,6 +1534,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             mode: toolCallingModeConfig as ToolCallingMode,
             apiDirectMaxTools,
             apiDirectIncludeAllTools,
+            apiDirectToolTokenBudget,
         });
 
         let sharedMemoryContext: SharedMemoryPromptContext | undefined;
@@ -1800,20 +1599,18 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             });
         }
 
-        const requestedMaxTokens = this.clampInt(
-            options.modelOptions?.max_tokens,
-            1,
-            393216,
-            Math.max(1, Math.min(model.maxOutputTokens, maxOutputCap))
-        );
-        const resolvedFamily = this.resolveModelFamily(requestModelId, source.familyOverride);
-        // DeepSeek V4 models support 384K max output (per official docs).
-        // Enforce this floor regardless of stale model cache or user override.
-        const effectiveModelMaxOutput =
-            resolvedFamily === "deepseek"
-                ? Math.max(model.maxOutputTokens, DEEPSEEK_MAX_OUTPUT_TOKENS)
-                : model.maxOutputTokens;
-        const maxTokens = Math.max(1, Math.min(requestedMaxTokens, effectiveModelMaxOutput, maxOutputCap));
+        const outputBudget = resolveOutputTokenBudget({
+            family: resolvedFamily,
+            requestedMaxTokens: typeof options.modelOptions?.max_tokens === "number"
+                ? options.modelOptions.max_tokens
+                : undefined,
+            modelMaxOutputTokens: model.maxOutputTokens,
+            hardCap: maxOutputCap,
+            localDefault: this.clampInt(cfg.get("localDefaultMaxOutputTokens", 32768), 1024, 131072, 32768),
+            deepSeekDefault: this.clampInt(cfg.get("deepSeekDefaultMaxOutputTokens", 65536), 1024, 393216, 65536),
+            deepSeekMaximum: DEEPSEEK_MAX_OUTPUT_TOKENS,
+        });
+        const { defaultMaxTokens: defaultMaxOutputTokens, requestedMaxTokens, maxTokens } = outputBudget;
         const temperatureDefault = resolvedFamily === "deepseek" ? 1.0 : 0.7;
         const temperature = this.clampNumber(options.modelOptions?.temperature ?? temperatureDefault, 0, 2, temperatureDefault);
         const toolTokenCount = this.estimateToolTokens(cappedToolConfig.tools);
@@ -1842,6 +1639,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             softInputTarget,
             maxTokens,
             requestedMaxTokens,
+            defaultMaxOutputTokens,
+            requestProvidedOutputLimit: outputBudget.requestProvidedLimit,
             cappedTools: Array.isArray(cappedToolConfig.tools) ? cappedToolConfig.tools.length : 0,
         });
 
@@ -2357,6 +2156,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 outputChars + thinkingChars
             );
             const usageSource = finalServerUsage ? "server" : "estimate";
+            const promptCacheUsage = calculatePromptCacheUsage(reportedUsage);
 
             progress.report(vscode.LanguageModelDataPart.text(JSON.stringify(reportedUsage), "usage"));
             this.log("chat.response.usage", {
@@ -2364,6 +2164,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 attemptNo: finalAttempt.attemptNo,
                 source: usageSource,
                 usage: reportedUsage,
+                promptCache: promptCacheUsage,
             });
 
             const metrics: LlamaChatTurnMetrics = {
@@ -2377,6 +2178,9 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 thinkingChars,
                 estimatedOutputTokens,
                 tokensPerSecond,
+                promptTokens: reportedUsage.prompt_tokens,
+                cachedPromptTokens: promptCacheUsage?.cachedTokens,
+                promptCacheHitPercent: promptCacheUsage?.hitPercent,
                 retriedAfterOverflow: finalAttempt.retriedAfterOverflow,
             };
 
@@ -2622,15 +2426,6 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         init: RequestInit,
         timeoutMs: number
     ): Promise<Response> {
-        const controller = new AbortController();
-        const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
-        try {
-            return await fetch(url, {
-                ...init,
-                signal: controller.signal,
-            });
-        } finally {
-            clearTimeout(timeoutHandle);
-        }
+        return this.httpTransport.request(url, init, timeoutMs);
     }
 }

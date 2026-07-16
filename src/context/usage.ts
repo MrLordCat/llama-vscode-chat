@@ -7,6 +7,13 @@ export interface ChatTokenUsage {
 	};
 }
 
+export interface PromptCacheUsage {
+	promptTokens: number;
+	cachedTokens: number;
+	uncachedTokens: number;
+	hitPercent: number;
+}
+
 function toNonNegativeInteger(value: unknown): number | undefined {
 	if (typeof value !== "number" || !Number.isFinite(value)) {
 		return undefined;
@@ -30,9 +37,14 @@ export function normalizeChatTokenUsage(value: unknown): ChatTokenUsage | undefi
 	}
 
 	const detailsCandidate = candidate.prompt_tokens_details;
-	const cachedTokens = detailsCandidate && typeof detailsCandidate === "object"
+	const openAiCachedTokens = detailsCandidate && typeof detailsCandidate === "object"
 		? toNonNegativeInteger((detailsCandidate as Record<string, unknown>).cached_tokens)
 		: undefined;
+	const deepSeekCachedTokens = toNonNegativeInteger(candidate.prompt_cache_hit_tokens);
+	const cachedTokensCandidate = openAiCachedTokens ?? deepSeekCachedTokens;
+	const cachedTokens = cachedTokensCandidate === undefined
+		? undefined
+		: Math.min(promptTokens, cachedTokensCandidate);
 
 	return {
 		prompt_tokens: promptTokens,
@@ -41,6 +53,22 @@ export function normalizeChatTokenUsage(value: unknown): ChatTokenUsage | undefi
 		...(cachedTokens === undefined
 			? {}
 			: { prompt_tokens_details: { cached_tokens: cachedTokens } }),
+	};
+}
+
+export function calculatePromptCacheUsage(usage: ChatTokenUsage): PromptCacheUsage | undefined {
+	const cachedTokens = usage.prompt_tokens_details?.cached_tokens;
+	if (cachedTokens === undefined) {
+		return undefined;
+	}
+
+	const promptTokens = Math.max(0, usage.prompt_tokens);
+	const normalizedCachedTokens = Math.min(promptTokens, Math.max(0, cachedTokens));
+	return {
+		promptTokens,
+		cachedTokens: normalizedCachedTokens,
+		uncachedTokens: Math.max(0, promptTokens - normalizedCachedTokens),
+		hitPercent: promptTokens === 0 ? 0 : Number(((normalizedCachedTokens / promptTokens) * 100).toFixed(1)),
 	};
 }
 
