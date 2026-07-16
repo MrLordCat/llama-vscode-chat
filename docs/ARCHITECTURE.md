@@ -27,6 +27,8 @@ VS Code language model provider. Stable compatibility ids remain under the
   fallback statistics forwarded to native Copilot Session Info.
 - `src/reasoning.ts` maps VS Code session effort values to local and DeepSeek
   request profiles and supplies the native model configuration schema.
+- `src/request/chat-request.ts` builds source-specific OpenAI-compatible request
+  bodies without transport or VS Code dependencies.
 - `src/ui/quick-access.ts` owns the grouped Quick Access tree, compact endpoint
   labels, native icons, and live state summaries.
 - `src/constants.ts` contains shared product, provider, endpoint, and limit
@@ -49,7 +51,8 @@ model provider surface. Update it explicitly with `npm run update-vscode-api`.
 5. VS Code messages and tools are converted to OpenAI format.
 6. Relevant shared memory is merged into the system context.
 7. Tool results are sanitized/truncated and the complete request is budgeted.
-8. The request is sent to the source-specific chat completion endpoint.
+8. The pure request builder applies local or DeepSeek fields, then the request
+   is sent to the source-specific chat completion endpoint.
 9. SSE chunks are coalesced and emitted as text, thinking, or tool-call parts.
 10. The final upstream usage chunk is validated and emitted as native `usage`
     response data, with an estimate used only when the server omits it.
@@ -87,8 +90,7 @@ provider monolith, in order:
 2. `context/`: token estimation and compaction policy (budget arithmetic is
    already extracted).
 3. `transport/`: endpoint selection, request execution, queueing, and retries.
-4. `request/`: source-specific payload profiles for local models and DeepSeek.
-5. `ui/`: extract command handlers and status presentation (Quick Access is
+4. `ui/`: extract command handlers and status presentation (Quick Access is
    already extracted).
 
 Each extraction should preserve behavior and land with focused tests before the

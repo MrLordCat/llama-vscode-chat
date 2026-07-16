@@ -1,0 +1,91 @@
+import * as assert from "assert";
+import { buildChatCompletionRequest } from "../request/chat-request";
+import type { OpenAIFunctionToolDef } from "../types";
+
+const tools: OpenAIFunctionToolDef[] = [{
+	type: "function",
+	function: {
+		name: "read_file",
+		parameters: { type: "object" },
+	},
+}];
+
+suite("chat request profiles", () => {
+	test("builds the llama.cpp request profile", () => {
+		const request = buildChatCompletionRequest({
+			model: "qwen-local",
+			family: "qwen",
+			maxTokens: 8192,
+			temperature: 0.7,
+			cachePrompt: true,
+			thinkingMode: "balanced",
+			reasoningBudget: 2048,
+			topP: 0.9,
+			topK: 40,
+			tools,
+			toolChoice: "auto",
+		});
+
+		assert.deepStrictEqual(request, {
+			model: "qwen-local",
+			messages: [],
+			stream: true,
+			stream_options: { include_usage: true },
+			max_tokens: 8192,
+			temperature: 0.7,
+			top_p: 0.9,
+			top_k: 40,
+			cache_prompt: true,
+			reasoning_budget: 2048,
+			reasoning: { budget_tokens: 2048 },
+			tools,
+			tool_choice: "auto",
+		});
+	});
+
+	test("omits unsupported sampling and tool choice in DeepSeek thinking mode", () => {
+		const request = buildChatCompletionRequest({
+			model: "deepseek-v4-pro",
+			family: "deepseek",
+			maxTokens: 393216,
+			temperature: 1,
+			cachePrompt: true,
+			thinkingMode: "deep",
+			reasoningBudget: 8192,
+			topP: 0.8,
+			topK: 20,
+			tools,
+			toolChoice: "auto",
+		});
+
+		assert.deepStrictEqual(request, {
+			model: "deepseek-v4-pro",
+			messages: [],
+			stream: true,
+			stream_options: { include_usage: true },
+			max_tokens: 393216,
+			thinking: { type: "enabled" },
+			reasoning_effort: "max",
+			tools,
+		});
+	});
+
+	test("keeps sampling when DeepSeek thinking is disabled", () => {
+		const request = buildChatCompletionRequest({
+			model: "deepseek-chat",
+			family: "deepseek",
+			maxTokens: 4096,
+			temperature: 1.2,
+			cachePrompt: true,
+			thinkingMode: "off",
+			reasoningBudget: 0,
+			topP: 0.95,
+		});
+
+		assert.strictEqual(request.temperature, 1.2);
+		assert.strictEqual(request.top_p, 0.95);
+		assert.deepStrictEqual(request.thinking, { type: "disabled" });
+		assert.ok(!("cache_prompt" in request));
+		assert.ok(!("reasoning_effort" in request));
+	});
+});

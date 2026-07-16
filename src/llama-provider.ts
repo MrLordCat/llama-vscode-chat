@@ -30,8 +30,8 @@ import {
     createReasoningConfigurationSchema,
     resolveReasoningBudget,
     resolveRequestThinkingMode,
-    toDeepSeekReasoningEffort,
 } from "./reasoning";
+import { buildChatCompletionRequest } from "./request/chat-request";
 import type { OpenAIChatMessage } from "./types";
 
 type ToolResultModeConfig = "auto" | "tool" | "user";
@@ -1937,8 +1937,6 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         const maxTokens = Math.max(1, Math.min(requestedMaxTokens, effectiveModelMaxOutput, maxOutputCap));
         const temperatureDefault = resolvedFamily === "deepseek" ? 1.0 : 0.7;
         const temperature = this.clampNumber(options.modelOptions?.temperature ?? temperatureDefault, 0, 2, temperatureDefault);
-        const isDeepSeekThinkingRequest = resolvedFamily === "deepseek" && thinkingMode !== "off";
-
         const toolTokenCount = this.estimateToolTokens(cappedToolConfig.tools);
         const contextBudget = calculateContextBudget({
             contextLength,
@@ -2037,54 +2035,23 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             };
         };
 
-        const requestModelFamily = this.resolveModelFamily(requestModelId, source.familyOverride);
-        const requestBody: Record<string, unknown> = {
+        const requestBody = buildChatCompletionRequest({
             model: requestModelId,
-            messages: [],
-            stream: true,
-            stream_options: {
-                include_usage: true,
-            },
-            max_tokens: maxTokens,
-        };
-
-        if (!isDeepSeekThinkingRequest) {
-            requestBody.temperature = temperature;
-        }
-
-        if (requestModelFamily !== "deepseek") {
-            requestBody.cache_prompt = cachePrompt;
-        }
-
-        if (requestModelFamily === "deepseek") {
-            requestBody.thinking = {
-                type: thinkingMode === "off" ? "disabled" : "enabled",
-            };
-            const reasoningEffort = toDeepSeekReasoningEffort(thinkingMode);
-            if (reasoningEffort) {
-                requestBody.reasoning_effort = reasoningEffort;
-            }
-        } else {
-            requestBody.reasoning_budget = reasoningBudget;
-            requestBody.reasoning = {
-                budget_tokens: reasoningBudget,
-            };
-        }
-
-        if (!isDeepSeekThinkingRequest && typeof options.modelOptions?.top_p === "number") {
-            requestBody.top_p = this.clampNumber(options.modelOptions.top_p, 0, 1, 1);
-        }
-
-        if (!isDeepSeekThinkingRequest && typeof options.modelOptions?.top_k === "number") {
-            requestBody.top_k = this.clampInt(options.modelOptions.top_k, 0, 1000, 40);
-        }
-
-        if (cappedToolConfig.tools) {
-            requestBody.tools = cappedToolConfig.tools;
-        }
-        if (cappedToolConfig.tool_choice && requestModelFamily !== "deepseek") {
-            requestBody.tool_choice = cappedToolConfig.tool_choice;
-        }
+            family: resolvedFamily,
+            maxTokens,
+            temperature,
+            cachePrompt,
+            thinkingMode,
+            reasoningBudget,
+            topP: typeof options.modelOptions?.top_p === "number"
+                ? this.clampNumber(options.modelOptions.top_p, 0, 1, 1)
+                : undefined,
+            topK: typeof options.modelOptions?.top_k === "number"
+                ? this.clampInt(options.modelOptions.top_k, 0, 1000, 40)
+                : undefined,
+            tools: cappedToolConfig.tools,
+            toolChoice: cappedToolConfig.tool_choice,
+        });
 
         const headers: Record<string, string> = {
             "Content-Type": "application/json",

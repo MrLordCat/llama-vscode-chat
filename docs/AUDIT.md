@@ -40,6 +40,13 @@ Completed in the third integration pass:
 - documented the complete fork scope and the ownership boundary between the
   normal VSIX and optional Copilot Chat bundle modifications.
 
+Completed in the fourth refactoring pass:
+
+- extracted the local and DeepSeek chat-completion request profiles into a
+  pure builder with table-driven tests;
+- removed source-specific sampling, reasoning, cache, usage, and tool-field
+  assembly from the request lifecycle method.
+
 ## Findings
 
 ### High Priority
@@ -51,8 +58,8 @@ Completed in the third integration pass:
    command handler. Quick Access is extracted; command handlers should follow
    after provider boundaries stabilize.
 3. Most model settings are global even though local models and DeepSeek have
-   different optimal reasoning, output, timeout, and tool policies. Introduce
-   source profiles before adding another hosted provider.
+   different optimal output, timeout, and tool policies. Request payload
+   profiles are now separate; configurable per-source settings remain.
 4. Compaction is deterministic but lossy and heuristic. It clips old turns and
    tool payloads instead of producing a model-assisted semantic summary. Keep
    the deterministic fallback, then add an optional tested summarizer.
@@ -84,10 +91,9 @@ Completed in the third integration pass:
 
 1. Extract model source discovery and source-specific credentials.
 2. Extract the remaining context compaction policy (budget arithmetic is done).
-3. Extract request payload builders for local and DeepSeek profiles.
-4. Extract transport queue and retry state machine.
-5. Split extension commands and status presentation (Quick Access is done).
-6. Add CI and release automation.
+3. Extract transport queue and retry state machine.
+4. Split extension commands and status presentation (Quick Access is done).
+5. Add CI and release automation.
 
 The rule for each phase is behavior-preserving extraction first, then targeted
 improvements. The full provider test suite must remain green after every phase.

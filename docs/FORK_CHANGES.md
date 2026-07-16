@@ -90,6 +90,7 @@ repository metadata, documentation, and release artifacts belong to the fork.
 | Source routing and request lifecycle | `src/llama-provider.ts` |
 | SSE, text, thinking, and tool parsing | `src/base-provider.ts` |
 | Context budgets and native usage | `src/context/` |
+| Local and DeepSeek request profiles | `src/request/` |
 | Shared memory | `src/memory/` |
 | Reasoning profiles | `src/reasoning.ts` |
 | Quick Access | `src/ui/quick-access.ts` |
