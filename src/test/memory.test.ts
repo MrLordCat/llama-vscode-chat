@@ -39,7 +39,7 @@ suite("Shared memory", () => {
 		});
 
 		assert.strictEqual(updated.id, created.id);
-		assert.strictEqual(memory.search("unrelated query")[0].id, created.id);
+		assert.strictEqual(memory.search("unrelated query").length, 0);
 		assert.strictEqual(await memory.remove(created.id), true);
 		assert.strictEqual(memory.count, 0);
 	});
@@ -54,6 +54,86 @@ suite("Shared memory", () => {
 
 		assert.strictEqual(reloaded.list().length, 1);
 		assert.strictEqual(reloaded.list()[0].id, created.id);
+		assert.strictEqual(reloaded.list()[0].scope, "global");
+		assert.strictEqual(reloaded.list()[0].kind, "other");
+	});
+
+	test("migrates version-one entries to global other memory", async () => {
+		await fs.writeFile(memory.filePath, JSON.stringify({
+			version: 1,
+			entries: [{
+				id: "legacy",
+				title: "Legacy preference",
+				content: "Use the existing build command.",
+				tags: [],
+				pinned: false,
+				createdAt: "2026-01-01T00:00:00.000Z",
+				updatedAt: "2026-01-01T00:00:00.000Z",
+			}],
+		}), "utf8");
+		await memory.reload();
+
+		assert.strictEqual(memory.list()[0].scope, "global");
+		assert.strictEqual(memory.list()[0].kind, "other");
+	});
+
+	test("filters workspace, model, and expired memory during injection", async () => {
+		await memory.upsert({ title: "Global", content: "Qwen global rule", scope: "global" });
+		await memory.upsert({ title: "Workspace A", content: "Qwen workspace alpha", scope: "workspace", scopeId: "file:///a" });
+		await memory.upsert({ title: "Workspace B", content: "Qwen workspace beta", scope: "workspace", scopeId: "file:///b" });
+		await memory.upsert({ title: "Model", content: "Qwen model rule", scope: "model", scopeId: "qwen-local" });
+		await memory.upsert({
+			title: "Expired",
+			content: "Qwen stale external fact",
+			kind: "externalFact",
+			sourceUrl: "https://example.com/fact",
+			verifiedAt: "2025-01-01T00:00:00.000Z",
+			expiresAt: "2025-02-01T00:00:00.000Z",
+		});
+
+		const context = await memory.buildPromptContext("qwen", 1024, {
+			workspaceId: "file:///a",
+			modelId: "qwen-local",
+		});
+		assert.ok(context?.text.includes("Qwen global rule"));
+		assert.ok(context?.text.includes("Qwen workspace alpha"));
+		assert.ok(!context?.text.includes("Qwen workspace beta"));
+		assert.ok(context?.text.includes("Qwen model rule"));
+		assert.ok(!context?.text.includes("Qwen stale external fact"));
+		assert.strictEqual(context?.expiredEntryCount, 1);
+
+		const modelOnly = memory.search("qwen", 1, {
+			workspaceId: "file:///a",
+			modelId: "qwen-local",
+			scope: "model",
+		});
+		assert.strictEqual(modelOnly.length, 1);
+		assert.strictEqual(modelOnly[0].scope, "model");
+	});
+
+	test("uses fuzzy retrieval without letting pinned unrelated entries leak in", async () => {
+		await memory.upsert({ title: "TypeScript build", content: "Compile with strict TypeScript checks." });
+		await memory.upsert({ title: "Unrelated", content: "Coffee preference", pinned: true });
+
+		const results = memory.search("typescrpt compilation");
+		assert.strictEqual(results[0]?.title, "TypeScript build");
+		assert.ok(!results.some(entry => entry.title === "Unrelated"));
+	});
+
+	test("requires provenance for external facts", async () => {
+		await assert.rejects(
+			memory.upsert({ title: "API limit", content: "The API has a changing limit.", kind: "externalFact" }),
+			/sourceUrl and verifiedAt/
+		);
+		const entry = await memory.upsert({
+			title: "API limit",
+			content: "The API has a changing limit.",
+			kind: "externalFact",
+			sourceUrl: "https://example.com/docs",
+			verifiedAt: "2026-07-17T00:00:00.000Z",
+		});
+		assert.strictEqual(entry.kind, "externalFact");
+		assert.strictEqual(entry.sourceUrl, "https://example.com/docs");
 	});
 
 	test("keeps injected memory inside its configured budget", async () => {

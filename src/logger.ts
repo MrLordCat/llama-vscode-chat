@@ -4,6 +4,8 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { inspect } from "node:util";
 
+import { EXTENSION_ID } from "./constants";
+
 type LogLevel = "debug" | "info" | "warn" | "error";
 
 interface LogRecord {
@@ -42,7 +44,7 @@ export class LlamaLogService implements vscode.Disposable, LlamaLogSink {
 		await this.ensureReady();
 		this.log("session.start", {
 			vscodeVersion: vscode.version,
-			extensionVersion: vscode.extensions.getExtension("maruf-bepary.llama-vscode-chat")?.packageJSON?.version,
+			extensionVersion: vscode.extensions.getExtension(EXTENSION_ID)?.packageJSON?.version,
 			logFile: this.currentLogPath,
 		});
 	}

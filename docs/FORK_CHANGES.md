@@ -33,6 +33,10 @@ repository metadata, documentation, and release artifacts belong to the fork.
 - DeepSeek receives its own thinking and reasoning profile and never receives
   llama.cpp-only `cache_prompt`.
 - Tool-result and tool-call compatibility retries are bounded and logged.
+- Tool calls are repaired only for deterministic syntax/name issues, validated
+  against the advertised schema, and rejected before execution when unsafe.
+- Consecutive identical tool calls are detected from history and receive a
+  bounded loop-breaking instruction.
 
 ### Context And Long Conversations
 
@@ -74,8 +78,11 @@ repository metadata, documentation, and release artifacts belong to the fork.
 
 - Durable memory is stored once in extension global storage and is shared by
   local models, DeepSeek, workspaces, and chats in the same VS Code profile.
-- Relevant entries are injected near the latest user turn within a separate
-  token budget, preserving the reusable prompt prefix.
+- Version-two entries support global, workspace, and model scopes; typed facts,
+  source provenance, verification time, and expiry.
+- Hybrid exact/fuzzy retrieval injects relevant non-expired entries near the
+  latest user turn within a separate token budget, preserving the reusable
+  prompt prefix.
 - Agent tools can store, search, and delete entries with confirmation for
   mutating operations.
 - The JSON store remains inspectable and editable by the user.
@@ -88,6 +95,10 @@ repository metadata, documentation, and release artifacts belong to the fork.
   verbose and can expose model output.
 - Quick Access groups model actions, endpoints, generation settings, memory,
   diagnostics, and live status instead of presenting one long flat list.
+- Provider health reports probe model discovery, local runtime context, exact
+  tokenization, cache configuration, and retired DeepSeek aliases.
+- Session quality reports aggregate cache, latency, throughput, compaction,
+  overflow, and tool reliability metrics without storing prompt bodies.
 
 ### Repository Cleanup
 
@@ -111,6 +122,8 @@ repository metadata, documentation, and release artifacts belong to the fork.
 | Local and DeepSeek request profiles | `src/request/` |
 | Serial request admission | `src/transport/` |
 | Shared memory | `src/memory/` |
+| Tool-call reliability | `src/tools/` |
+| Health and session reports | `src/diagnostics/` |
 | Reasoning profiles | `src/reasoning.ts` |
 | Quick Access and behavior commands | `src/ui/` |
 | Copilot bundle patch tooling | `scripts/patch-copilot-chat.mjs` |

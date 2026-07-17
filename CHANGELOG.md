@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.0 - 2026-07-17
+
+- Added deterministic tool-call repair, advertised-schema validation, bounded
+  correction retry, and repeated identical-call loop protection.
+- Upgraded shared memory to format v2 with global/workspace/model scopes,
+  typed entries, source provenance, verification time, expiry, and hybrid
+  exact/fuzzy retrieval. Version-one files migrate automatically.
+- Added a read-only provider health check for discovery, runtime context,
+  tokenizer support, prompt-cache settings, reliability controls, and retired
+  DeepSeek aliases.
+- Added privacy-preserving Markdown/JSON session quality reports for cache hit
+  rate, latency, throughput, compaction, overflow recovery, and tool-call
+  reliability.
+- Added the new diagnostics to Quick Access and expanded regression coverage
+  across streaming, correction retries, memory migration, and reporting.
+
 ## 1.2.0 - 2026-07-17
 
 - Added adaptive and strict knowledge-verification modes for source-backed,

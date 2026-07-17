@@ -47,7 +47,9 @@ suite("quick access", () => {
 			() => "24.5 tok/s",
 			() => ({ summary: "61.0%", breakdown: "msg 20K + tools 2K + reserved 8K" }),
 			() => 0,
-			() => "75.0% (75/100)"
+			() => "75.0% (75/100)",
+			() => "4 turns / cache 75%",
+			() => "PASS"
 		);
 		const diagnostics = (await getItems(provider)).find(item => labelOf(item) === "Diagnostics");
 		assert.ok(diagnostics);
@@ -56,6 +58,12 @@ suite("quick access", () => {
 		assert.ok(children.some(item => labelOf(item) === "Throughput"));
 		assert.ok(children.some(item => labelOf(item) === "Context Usage"));
 		assert.strictEqual(children.find(item => labelOf(item) === "Prompt Cache")?.description, "75.0% (75/100)");
+		assert.strictEqual(children.find(item => labelOf(item) === "Provider Health Check")?.description, "PASS");
+		assert.strictEqual(children.find(item => labelOf(item) === "Session Quality Report")?.description, "4 turns / cache 75%");
+		assert.strictEqual(
+			children.find(item => labelOf(item) === "Provider Health Check")?.command?.command,
+			"llamacpp.runHealthCheck"
+		);
 		assert.ok(!children.some(item => labelOf(item) === "Context Breakdown"));
 		assert.strictEqual(
 			children.find(item => labelOf(item) === "Context Usage")?.tooltip,
@@ -72,5 +80,19 @@ suite("quick access", () => {
 		const knowledge = children.find(item => labelOf(item) === "Knowledge Verification");
 		assert.ok(knowledge);
 		assert.strictEqual(knowledge.command?.command, "llamacpp.setKnowledgeMode");
+	});
+
+	test("shows expired memory separately", async () => {
+		const provider = new LlamaQuickActionsProvider(
+			() => undefined,
+			() => undefined,
+			() => 5,
+			() => undefined,
+			() => undefined,
+			() => undefined,
+			() => 2
+		);
+		const memory = (await getItems(provider)).find(item => labelOf(item) === "Memory");
+		assert.strictEqual(memory?.description, "5 entries / 2 expired");
 	});
 });

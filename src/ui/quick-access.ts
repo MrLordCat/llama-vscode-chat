@@ -68,7 +68,10 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 		private readonly getLastThroughput: () => string | undefined,
 		private readonly getLastContextUsage: () => QuickAccessContextUsage | undefined,
 		private readonly getMemoryCount: () => number,
-		private readonly getLastPromptCache: () => string | undefined = () => undefined
+		private readonly getLastPromptCache: () => string | undefined = () => undefined,
+		private readonly getSessionSummary: () => string | undefined = () => undefined,
+		private readonly getHealthStatus: () => string | undefined = () => undefined,
+		private readonly getExpiredMemoryCount: () => number = () => 0
 	) {}
 
 	refresh(): void {
@@ -107,9 +110,15 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 		const contextUsageStatusBarEnabled = config.get<boolean>("showContextUsageStatusBar", true) !== false;
 		const memoryEnabled = config.get<boolean>("memoryEnabled", true) !== false;
 		const memoryCount = this.getMemoryCount();
+		const expiredMemoryCount = this.getExpiredMemoryCount();
+		const memoryDescription = memoryEnabled
+			? `${memoryCount} entries${expiredMemoryCount > 0 ? ` / ${expiredMemoryCount} expired` : ""}`
+			: "Off";
 		const lastThroughput = this.getLastThroughput();
 		const lastContextUsage = this.getLastContextUsage();
 		const lastPromptCache = this.getLastPromptCache();
+		const sessionSummary = this.getSessionSummary();
+		const healthStatus = this.getHealthStatus();
 
 		const connections = new QuickAccessItem("connections", "Connections", {
 			description: `Local ${localServerEnabled ? "on" : "off"} · DeepSeek ${deepSeekEnabled ? "on" : "off"}`,
@@ -190,7 +199,7 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 
 		const memoryChildren = [
 			new QuickAccessItem("memory.open", "Shared Memory", {
-				description: memoryEnabled ? `${memoryCount} entries` : "Off",
+				description: memoryDescription,
 				icon: new vscode.ThemeIcon("database"),
 				command: command("llamacpp.openMemory", "Open Shared Memory"),
 			}),
@@ -204,7 +213,7 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 			);
 		}
 		const memory = new QuickAccessItem("memory", "Memory", {
-			description: memoryEnabled ? `${memoryCount} entries` : "Off",
+			description: memoryDescription,
 			icon: new vscode.ThemeIcon("database"),
 			children: memoryChildren,
 		});
@@ -213,6 +222,22 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 			description: `${lastThroughput ?? "n/a"} · ctx ${lastContextUsage?.summary ?? "n/a"}`,
 			icon: new vscode.ThemeIcon("pulse"),
 			children: [
+				new QuickAccessItem("diagnostics.health", "Provider Health Check", {
+					description: healthStatus ?? "Not run",
+					tooltip: "Run read-only endpoint, runtime context, tokenizer, cache, and reliability checks.",
+					icon: new vscode.ThemeIcon("heart"),
+					command: command("llamacpp.runHealthCheck", "Run Provider Health Check"),
+				}),
+				new QuickAccessItem("diagnostics.session", "Session Quality Report", {
+					description: sessionSummary ?? "No turns",
+					tooltip: "Export aggregate cache, latency, context, compaction, and tool-call reliability metrics.",
+					icon: new vscode.ThemeIcon("graph"),
+					command: command("llamacpp.openSessionReport", "Open Session Quality Report"),
+				}),
+				new QuickAccessItem("diagnostics.resetSession", "Reset Session Metrics", {
+					icon: new vscode.ThemeIcon("clear-all"),
+					command: command("llamacpp.resetSessionReport", "Reset Session Metrics"),
+				}),
 				new QuickAccessItem("diagnostics.throughput", "Throughput", {
 					description: lastThroughput ?? "n/a",
 					icon: new vscode.ThemeIcon("dashboard"),

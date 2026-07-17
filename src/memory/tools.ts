@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
+import { getCurrentWorkspaceScopeId } from "./scope";
 import type { SharedMemoryService } from "./shared-memory-service";
+import type { SharedMemoryKind, SharedMemoryScope } from "./types";
 
 interface StoreMemoryInput {
 	id?: string;
@@ -7,11 +9,20 @@ interface StoreMemoryInput {
 	content: string;
 	tags?: string[];
 	pinned?: boolean;
+	scope?: SharedMemoryScope;
+	scopeId?: string;
+	kind?: SharedMemoryKind;
+	sourceUrl?: string;
+	verifiedAt?: string;
+	expiresAt?: string;
 }
 
 interface SearchMemoryInput {
 	query?: string;
 	limit?: number;
+	modelId?: string;
+	includeExpired?: boolean;
+	scope?: SharedMemoryScope;
 }
 
 interface DeleteMemoryInput {
@@ -32,9 +43,13 @@ class StoreMemoryTool implements vscode.LanguageModelTool<StoreMemoryInput> {
 	}
 
 	async invoke(options: vscode.LanguageModelToolInvocationOptions<StoreMemoryInput>): Promise<vscode.LanguageModelToolResult> {
-		const entry = await this.memory.upsert(options.input);
+		const input = { ...options.input };
+		if (input.scope === "workspace" && !input.scopeId) {
+			input.scopeId = getCurrentWorkspaceScopeId();
+		}
+		const entry = await this.memory.upsert(input);
 		return new vscode.LanguageModelToolResult([
-			new vscode.LanguageModelTextPart(`Saved shared memory ${entry.id}: ${entry.title}`),
+			new vscode.LanguageModelTextPart(`Saved ${entry.scope}/${entry.kind} memory ${entry.id}: ${entry.title}`),
 		]);
 	}
 }
@@ -47,10 +62,27 @@ class SearchMemoryTool implements vscode.LanguageModelTool<SearchMemoryInput> {
 	}
 
 	invoke(options: vscode.LanguageModelToolInvocationOptions<SearchMemoryInput>): vscode.LanguageModelToolResult {
-		const entries = this.memory.search(options.input.query ?? "", options.input.limit ?? 12);
+		const entries = this.memory.search(
+			options.input.query ?? "",
+			options.input.limit ?? 12,
+			{
+				workspaceId: getCurrentWorkspaceScopeId(),
+				modelId: options.input.modelId,
+				includeExpired: options.input.includeExpired === true,
+				scope: options.input.scope,
+			}
+		);
 		const result = entries.length === 0
 			? "No matching shared memory entries."
-			: entries.map(entry => `- [${entry.id}] ${entry.title}\n${entry.content}`).join("\n\n");
+			: entries.map(entry => {
+				const metadata = [
+					`${entry.scope}/${entry.kind}`,
+					entry.sourceUrl ? `source=${entry.sourceUrl}` : undefined,
+					entry.verifiedAt ? `verified=${entry.verifiedAt}` : undefined,
+					entry.expiresAt ? `expires=${entry.expiresAt}` : undefined,
+				].filter(Boolean).join("; ");
+				return `- [${entry.id}] ${entry.title} (${metadata})\n${entry.content}`;
+			}).join("\n\n");
 		return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(result)]);
 	}
 }

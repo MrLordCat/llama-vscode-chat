@@ -1,5 +1,7 @@
 
 import * as vscode from "vscode";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 
 import {
 	LlamaCppChatModelProvider,
@@ -17,6 +19,8 @@ import {
 	PROVIDER_VENDOR,
 } from "./constants";
 import { LlamaLogService } from "./logger";
+import { renderProviderHealthMarkdown } from "./diagnostics/provider-health";
+import { SessionQualityTracker } from "./diagnostics/session-report";
 import { SharedMemoryService } from "./memory/shared-memory-service";
 import { registerMemoryTools } from "./memory/tools";
 import { registerModelBehaviorCommands } from "./ui/model-behavior-commands";
@@ -145,6 +149,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const ua = `${EXTENSION_NAME}/${extVersion} VSCode/${vscodeVersion}`;
 	const logService = new LlamaLogService(context);
 	const memoryService = new SharedMemoryService(context.globalStorageUri.fsPath);
+	const sessionQuality = new SessionQualityTracker();
 	context.subscriptions.push(logService);
 	await Promise.all([logService.initialize(), memoryService.initialize()]);
 	registerMemoryTools(context, memoryService);
@@ -155,11 +160,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	let lastThroughput: string | undefined;
 	let lastPromptCache: string | undefined;
 	let lastContextUsage: ContextUsageDisplay | undefined;
+	let lastHealthStatus: string | undefined;
 	const quickActionsProvider = new LlamaQuickActionsProvider(
 		() => lastThroughput,
 		() => lastContextUsage,
 		() => memoryService.count,
-		() => lastPromptCache
+		() => lastPromptCache,
+		() => sessionQuality.count === 0 ? "No turns" : `${sessionQuality.count} turns / cache ${sessionQuality.summary.cacheHitPercent ?? "n/a"}%`,
+		() => lastHealthStatus,
+		() => memoryService.expiredCount
 	);
 	context.subscriptions.push(vscode.window.registerTreeDataProvider("llamacpp-quick-actions", quickActionsProvider));
 	context.subscriptions.push(memoryService.onDidChange(() => quickActionsProvider.refresh()));
@@ -201,6 +210,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	context.subscriptions.push(
 		llamaProvider.onDidUpdateContextUsage((usage: LlamaChatContextUsageMetrics) => {
+			sessionQuality.recordContext(usage);
 			lastContextUsage = formatContextUsage(usage);
 			contextUsageStatusBar.text = lastContextUsage.statusBarText;
 			contextUsageStatusBar.tooltip = lastContextUsage.tooltip;
@@ -210,6 +220,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	context.subscriptions.push(
 		llamaProvider.onDidCompleteChatTurn((metrics: LlamaChatTurnMetrics) => {
+			sessionQuality.recordTurn(metrics);
 			const tpsText = metrics.tokensPerSecond === undefined ? "n/a" : `${metrics.tokensPerSecond.toFixed(1)} tok/s`;
 			const latencyText = metrics.firstTokenLatencyMs === undefined ? "n/a" : `${metrics.firstTokenLatencyMs} ms`;
 			const queueText = `${metrics.queueWaitMs} ms`;
@@ -235,6 +246,56 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			performanceStatusBar.text = `$(dashboard) local LLM ${tpsText}`;
 			performanceStatusBar.tooltip = performanceTooltipLines.join("\n");
 			quickActionsProvider.refresh();
+		})
+	);
+
+	const writeReport = async (baseName: string, markdown: string, json: unknown): Promise<string> => {
+		const reportDirectory = path.join(context.globalStorageUri.fsPath, "reports");
+		await fs.mkdir(reportDirectory, { recursive: true });
+		const stamp = new Date().toISOString().replace(/[.:]/g, "-");
+		const markdownPath = path.join(reportDirectory, `${baseName}-${stamp}.md`);
+		const jsonPath = path.join(reportDirectory, `${baseName}-${stamp}.json`);
+		await Promise.all([
+			fs.writeFile(markdownPath, markdown, "utf8"),
+			fs.writeFile(jsonPath, `${JSON.stringify(json, null, 2)}\n`, "utf8"),
+		]);
+		const document = await vscode.workspace.openTextDocument(vscode.Uri.file(markdownPath));
+		await vscode.window.showTextDocument(document, { preview: false });
+		return markdownPath;
+	};
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.runHealthCheck", async () => {
+			const cancellation = new vscode.CancellationTokenSource();
+			try {
+				const report = await vscode.window.withProgress(
+					{
+						location: vscode.ProgressLocation.Notification,
+						title: "Checking Local LLM providers",
+						cancellable: false,
+					},
+					() => llamaProvider.runHealthCheck(extVersion, cancellation.token)
+				);
+				lastHealthStatus = report.overallStatus.toUpperCase();
+				await writeReport("provider-health", renderProviderHealthMarkdown(report), report);
+				quickActionsProvider.refresh();
+				vscode.window.showInformationMessage(`Local LLM health check: ${lastHealthStatus}`);
+			} finally {
+				cancellation.dispose();
+			}
+		}),
+		vscode.commands.registerCommand("llamacpp.openSessionReport", async () => {
+			const payload = sessionQuality.toJSON();
+			await writeReport(
+				"session-quality",
+				sessionQuality.renderMarkdown(extVersion, vscodeVersion),
+				payload
+			);
+		}),
+		vscode.commands.registerCommand("llamacpp.resetSessionReport", async () => {
+			sessionQuality.clear();
+			quickActionsProvider.refresh();
+			vscode.window.showInformationMessage("Local LLM session metrics reset.");
 		})
 	);
 

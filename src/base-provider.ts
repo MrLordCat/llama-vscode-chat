@@ -10,8 +10,14 @@ import {
     LanguageModelResponsePart,
     Progress,
 } from "vscode";
-import { tryParseJSONObject } from "./utils";
 import { normalizeChatTokenUsage, type ChatTokenUsage } from "./context/usage";
+import {
+    ToolCallReliabilityGuard,
+    ToolCallValidationError,
+    type ToolCallReliabilityMetrics,
+    type ToolCallReliabilityOptions,
+} from "./tools/tool-call-reliability";
+import type { OpenAIFunctionToolDef } from "./types";
 
 export const DEFAULT_MAX_OUTPUT_TOKENS = 131072;
 export const DEFAULT_CONTEXT_LENGTH = 65536;
@@ -63,6 +69,18 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
     private _insideThinkingTag = false;
     private _thinkingFallbackHeaderEmitted = false;
     private _emittedThinkingParts = new WeakMap<object, string>();
+    private readonly _toolCallReliability = new ToolCallReliabilityGuard();
+
+    protected configureToolCallReliability(
+        tools: readonly OpenAIFunctionToolDef[] | undefined,
+        options: ToolCallReliabilityOptions
+    ): void {
+        this._toolCallReliability.configure(tools, options);
+    }
+
+    protected consumeToolCallReliabilityMetrics(): ToolCallReliabilityMetrics {
+        return this._toolCallReliability.consumeMetrics();
+    }
 
     /**
      * Creates a new instance of the base chat model provider.
@@ -337,7 +355,7 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
                 }
             }
 
-            await this.flushToolCallBuffers(coalescedProgress.progress, /*throwOnInvalid*/ false);
+            await this.flushToolCallBuffers(coalescedProgress.progress, /*throwOnInvalid*/ true);
             await this.flushActiveTextToolCall(coalescedProgress.progress);
             this.flushThinkingBuffers(coalescedProgress.progress);
             coalescedProgress.flush();
@@ -482,23 +500,21 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
 
         const data = line.slice(6);
         if (data === "[DONE]") {
-            // Do not throw on [DONE]; any incomplete/empty buffers are ignored.
-            await this.flushToolCallBuffers(progress, /*throwOnInvalid*/ false);
-            // Flush any in-progress text-embedded tool call (silent if incomplete)
-            await this.flushActiveTextToolCall(progress);
+            // Final validation runs once after the stream reader drains.
             this.flushThinkingBuffers(progress);
             return undefined;
         }
 
+        let parsed: Record<string, unknown>;
         try {
-            const parsed = JSON.parse(data) as Record<string, unknown>;
-            const usage = normalizeChatTokenUsage(parsed.usage);
-            await this.processDelta(parsed, progress);
-            return usage;
+            parsed = JSON.parse(data) as Record<string, unknown>;
         } catch {
-            // Silently ignore malformed SSE lines temporarily
+            // A malformed transport line is not a model tool-call failure.
             return undefined;
         }
+        const usage = normalizeChatTokenUsage(parsed.usage);
+        await this.processDelta(parsed, progress);
+        return usage;
     }
 
     /**
@@ -853,7 +869,7 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
                 } else /* end */ {
                     // No args, finalize immediately
                     data = data.slice(delimIdx + END.length);
-                    const did = this.emitTextToolCallIfValid(progress, this._textToolActive, "{}");
+                    const did = this.emitTextToolCallIfValid(progress, this._textToolActive, "{}", true);
                     if (did) {
                         this._textToolActive.emitted = true;
                         emittedAny = true;
@@ -870,7 +886,7 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
                 this._textToolActive.argBuffer += data;
                 // Early emit when JSON becomes valid and we haven't emitted yet
                 if (!this._textToolActive.emitted) {
-                    const did = this.emitTextToolCallIfValid(progress, this._textToolActive, this._textToolActive.argBuffer);
+                    const did = this.emitTextToolCallIfValid(progress, this._textToolActive, this._textToolActive.argBuffer, false);
                     if (did) {
                         this._textToolActive.emitted = true;
                         emittedAny = true;
@@ -884,7 +900,7 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
                 data = data.slice(e2 + END.length);
                 // Final attempt to emit if not already
                 if (!this._textToolActive.emitted) {
-                    const did = this.emitTextToolCallIfValid(progress, this._textToolActive, this._textToolActive.argBuffer);
+                    const did = this.emitTextToolCallIfValid(progress, this._textToolActive, this._textToolActive.argBuffer, true);
                     if (did) {
                         emittedAny = true;
                     }
@@ -916,18 +932,21 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
     private emitTextToolCallIfValid(
         progress: vscode.Progress<vscode.LanguageModelResponsePart>,
         call: { name?: string; index?: number; argBuffer: string; emitted?: boolean },
-        argText: string
+        argText: string,
+        final: boolean
     ): boolean {
-        const name = call.name ?? "unknown_tool";
-        const parsed = tryParseJSONObject(argText);
-        if (!parsed.ok) {
+        const evaluated = this._toolCallReliability.evaluate(call.name, argText, final);
+        if (!evaluated.ok) {
+            if (!evaluated.pending && final) {
+                throw new ToolCallValidationError(evaluated.reason, call.name, evaluated.kind);
+            }
             return false;
         }
-        const canonical = JSON.stringify(parsed.value);
-        const key = `${name}:${canonical}`;
+        const canonical = JSON.stringify(evaluated.arguments);
+        const key = `${evaluated.name}:${canonical}`;
         // identity-based dedupe when index is present
         if (typeof call.index === "number") {
-            const idKey = `${name}:${call.index}`;
+            const idKey = `${evaluated.name}:${call.index}`;
             if (this._emittedTextToolCallIds.has(idKey)) {
                 return false;
             }
@@ -938,7 +957,7 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
         }
         this._emittedTextToolCallKeys.add(key);
         const id = `tct_${Math.random().toString(36).slice(2, 10)}`;
-        progress.report(new vscode.LanguageModelToolCallPart(id, name, parsed.value));
+        progress.report(new vscode.LanguageModelToolCallPart(id, evaluated.name, evaluated.arguments));
         return true;
     }
 
@@ -954,12 +973,7 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
             return;
         }
         const argText = this._textToolActive.argBuffer;
-        const parsed = tryParseJSONObject(argText);
-        if (!parsed.ok) {
-            return;
-        }
-        // Emit (dedupe ensures we don't double-emit)
-        this.emitTextToolCallIfValid(progress, this._textToolActive, argText);
+        this.emitTextToolCallIfValid(progress, this._textToolActive, argText, true);
         this._textToolActive = undefined;
     }
 
@@ -974,19 +988,19 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
         if (!buf.name) {
             return;
         }
-        const canParse = tryParseJSONObject(buf.args);
-        if (!canParse.ok) {
+        const evaluated = this._toolCallReliability.evaluate(buf.name, buf.args, false);
+        if (!evaluated.ok) {
             return;
         }
         const id = buf.id ?? `call_${Math.random().toString(36).slice(2, 10)}`;
-        const parameters = canParse.value;
+        const parameters = evaluated.arguments;
         try {
             const canonical = JSON.stringify(parameters);
-            this._emittedTextToolCallKeys.add(`${buf.name}:${canonical}`);
+            this._emittedTextToolCallKeys.add(`${evaluated.name}:${canonical}`);
         } catch {
             /* ignore */
         }
-        progress.report(new vscode.LanguageModelToolCallPart(id, buf.name, parameters));
+        progress.report(new vscode.LanguageModelToolCallPart(id, evaluated.name, parameters));
         this._toolCallBuffers.delete(index);
         this._completedToolCallIndices.add(index);
     }
@@ -1007,27 +1021,25 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
             return;
         }
         for (const [idx, buf] of Array.from(this._toolCallBuffers.entries())) {
-            const parsed = tryParseJSONObject(buf.args);
-            if (!parsed.ok) {
+            const evaluated = this._toolCallReliability.evaluate(buf.name, buf.args, true);
+            if (!evaluated.ok) {
                 if (throwOnInvalid) {
-                    console.error("[Chat Model Provider] Invalid JSON for tool call", {
-                        idx,
-                        snippet: (buf.args || "").slice(0, 200),
-                    });
-                    throw new Error("Invalid JSON for tool call");
+                    const reason = evaluated.pending ? "incomplete tool-call arguments" : evaluated.reason;
+                    const kind = evaluated.pending ? "json" : evaluated.kind;
+                    throw new ToolCallValidationError(reason, buf.name, kind);
                 }
-                // When not throwing (e.g. on [DONE]), drop silently to reduce noise
+                // Keep the buffer for the final validation pass.
                 continue;
             }
             const id = buf.id ?? `call_${Math.random().toString(36).slice(2, 10)}`;
-            const name = buf.name ?? "unknown_tool";
+            const name = evaluated.name;
             try {
-                const canonical = JSON.stringify(parsed.value);
+                const canonical = JSON.stringify(evaluated.arguments);
                 this._emittedTextToolCallKeys.add(`${name}:${canonical}`);
             } catch {
                 /* ignore */
             }
-            progress.report(new vscode.LanguageModelToolCallPart(id, name, parsed.value));
+            progress.report(new vscode.LanguageModelToolCallPart(id, name, evaluated.arguments));
             this._toolCallBuffers.delete(idx);
             this._completedToolCallIndices.add(idx);
         }
@@ -1041,9 +1053,6 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
      * @returns The text with control tokens removed.
      */
     private stripControlTokens(text: string): string {
-         // Implement if needed, or just return text if not used elsewhere, but the original code called `this.stripControlTokens`.
-         // I missed copying that method or it wasn't shown in the view_file.
-         // Let me check the view_file output again.
-         return text.replace(/<\|tool_call_begin\|>|<\|tool_call_argument_begin\|>|<\|tool_call_end\|>/g, "");
+		return text.replace(/<\|tool_call_begin\|>|<\|tool_call_argument_begin\|>|<\|tool_call_end\|>/g, "");
     }
 }

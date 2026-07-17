@@ -1,6 +1,8 @@
 import * as assert from "assert";
 import * as vscode from "vscode";
 import { LlamaCppChatModelProvider } from "../llama-provider";
+import { ToolCallValidationError, type ToolCallReliabilityMetrics } from "../tools/tool-call-reliability";
+import type { OpenAIFunctionToolDef } from "../types";
 import { convertMessages, convertTools, validateRequest } from "../utils";
 
 // Mock SecretStorage
@@ -27,6 +29,20 @@ suite("Llama.cpp Chat Provider Extension", () => {
     suite("provider", () => {
         const secretStorage = new MockSecretStorage();
         const provider = new LlamaCppChatModelProvider(secretStorage, "test-user-agent");
+		const configureStreamingTools = (names: readonly string[]): void => {
+			(provider as unknown as {
+				configureToolCallReliability: (
+					tools: readonly OpenAIFunctionToolDef[],
+					options: { repairEnabled: boolean; validateSchema: boolean }
+				) => void;
+			}).configureToolCallReliability(
+				names.map(name => ({
+					type: "function",
+					function: { name, parameters: { type: "object" } },
+				})),
+				{ repairEnabled: true, validateSchema: true }
+			);
+		};
 
         test("provideLanguageModelChatInformation returns array (defaults)", async () => {
             const infos = await provider.provideLanguageModelChatInformation(
@@ -49,6 +65,40 @@ suite("Llama.cpp Chat Provider Extension", () => {
 			const sources = await providerAny.getModelSources();
 			assert.strictEqual(sources.find(source => source.key === "primary")?.apiKey, "primary-key");
 			assert.strictEqual(sources.find(source => source.key === "deepseek")?.apiKey, "deepseek-key");
+		});
+
+		test("health check warns about retired DeepSeek aliases", async () => {
+			const providerAny = provider as unknown as {
+				getModelSources: () => Promise<Array<{
+					key: string;
+					label: string;
+					serverUrl: string;
+					apiKey?: string;
+				}>>;
+				fetchModels: () => Promise<Array<{ id: string }>>;
+			};
+			const originalGetModelSources = providerAny.getModelSources;
+			const originalFetchModels = providerAny.fetchModels;
+
+			try {
+				providerAny.getModelSources = async () => [{
+					key: "deepseek",
+					label: "DeepSeek",
+					serverUrl: "https://api.deepseek.com",
+				}];
+				providerAny.fetchModels = async () => [{ id: "deepseek-chat" }];
+				const report = await provider.runHealthCheck(
+					"test",
+					new vscode.CancellationTokenSource().token
+				);
+				assert.strictEqual(report.sources[0].checks.find(check =>
+					check.id === "deprecated-model-alias"
+				)?.status, "warning");
+				assert.strictEqual(report.overallStatus, "warning");
+			} finally {
+				providerAny.getModelSources = originalGetModelSources;
+				providerAny.fetchModels = originalFetchModels;
+			}
 		});
 
         test("discovers local and DeepSeek models as separate sources", async () => {
@@ -699,6 +749,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
         });
 
         test("flushes buffered tool calls when stream ends without DONE", async () => {
+			configureStreamingTools(["read_file"]);
             const providerAny = provider as unknown as {
                 processStreamingResponse: (
                     responseBody: ReadableStream<Uint8Array>,
@@ -736,6 +787,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
         });
 
         test("processes final SSE line without trailing newline", async () => {
+			configureStreamingTools(["list_dir"]);
             const providerAny = provider as unknown as {
                 processStreamingResponse: (
                     responseBody: ReadableStream<Uint8Array>,
@@ -775,6 +827,7 @@ suite("Llama.cpp Chat Provider Extension", () => {
         });
 
         test("flushes multiple buffered tool calls at stream end", async () => {
+			configureStreamingTools(["grep_search", "list_dir"]);
             const providerAny = provider as unknown as {
                 processStreamingResponse: (
                     responseBody: ReadableStream<Uint8Array>,
@@ -814,6 +867,115 @@ suite("Llama.cpp Chat Provider Extension", () => {
                     { name: "list_dir", input: { path: "src" } },
                 ]
             );
+        });
+
+        test("repairs and validates streamed tool calls before emitting them", async () => {
+            const providerAny = provider as unknown as {
+                configureToolCallReliability: (
+                    tools: readonly OpenAIFunctionToolDef[],
+                    options: { repairEnabled: boolean; validateSchema: boolean }
+                ) => void;
+                consumeToolCallReliabilityMetrics: () => ToolCallReliabilityMetrics;
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<void>;
+            };
+            const tool: OpenAIFunctionToolDef = {
+                type: "function",
+                function: {
+                    name: "read_file",
+                    parameters: {
+                        type: "object",
+                        properties: { path: { type: "string" } },
+                        required: ["path"],
+                        additionalProperties: false,
+                    },
+                },
+            };
+            providerAny.configureToolCallReliability([tool], { repairEnabled: true, validateSchema: true });
+
+            const payload =
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_repaired\",\"function\":{\"name\":\"READ_FILE\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\",}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+                "data: [DONE]\n\n";
+            const stream = new ReadableStream<Uint8Array>({
+                start(controller) {
+                    controller.enqueue(new TextEncoder().encode(payload));
+                    controller.close();
+                },
+            });
+            const parts: vscode.LanguageModelResponsePart[] = [];
+            await providerAny.processStreamingResponse(
+                stream,
+                { report: part => parts.push(part) },
+                new vscode.CancellationTokenSource().token
+            );
+
+            const toolCall = parts.find(
+                (part): part is vscode.LanguageModelToolCallPart => part instanceof vscode.LanguageModelToolCallPart
+            );
+            assert.strictEqual(toolCall?.name, "read_file");
+            assert.deepStrictEqual(toolCall?.input, { path: "README.md" });
+            assert.deepStrictEqual(providerAny.consumeToolCallReliabilityMetrics(), {
+                accepted: 1,
+                repaired: 1,
+                rejected: 0,
+                unknownTool: 0,
+                schemaRejected: 0,
+                loopDetected: false,
+            });
+        });
+
+        test("rejects a schema-invalid streamed tool call once", async () => {
+            const providerAny = provider as unknown as {
+                configureToolCallReliability: (
+                    tools: readonly OpenAIFunctionToolDef[],
+                    options: { repairEnabled: boolean; validateSchema: boolean }
+                ) => void;
+                consumeToolCallReliabilityMetrics: () => ToolCallReliabilityMetrics;
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<void>;
+            };
+            providerAny.configureToolCallReliability([{
+                type: "function",
+                function: {
+                    name: "read_file",
+                    parameters: {
+                        type: "object",
+                        properties: { path: { type: "string" } },
+                        required: ["path"],
+                        additionalProperties: false,
+                    },
+                },
+            }], { repairEnabled: true, validateSchema: true });
+
+            const payload =
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_invalid\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}]}}]}\n\n" +
+                "data: [DONE]\n\n";
+            const stream = new ReadableStream<Uint8Array>({
+                start(controller) {
+                    controller.enqueue(new TextEncoder().encode(payload));
+                    controller.close();
+                },
+            });
+
+            await assert.rejects(
+                providerAny.processStreamingResponse(
+                    stream,
+                    { report: () => undefined },
+                    new vscode.CancellationTokenSource().token
+                ),
+                error => error instanceof ToolCallValidationError && error.kind === "schema"
+            );
+            const metrics = providerAny.consumeToolCallReliabilityMetrics();
+            assert.strictEqual(metrics.rejected, 1);
+            assert.strictEqual(metrics.schemaRejected, 1);
+
+            providerAny.configureToolCallReliability([], { repairEnabled: true, validateSchema: true });
         });
 
         test("auto-retries continuation when model returns empty output", async () => {
@@ -928,6 +1090,109 @@ suite("Llama.cpp Chat Provider Extension", () => {
             );
             assert.strictEqual(textParts.length, 1);
             assert.strictEqual(textParts[0].value, "Recovered response");
+        });
+
+        test("retries a rejected tool call with a bounded correction prompt", async () => {
+            const providerAny = provider as unknown as {
+                getServerUrl: () => Promise<string>;
+                getApiKey: () => Promise<string | undefined>;
+                getRuntimeContextLengthWithCache: () => Promise<number | undefined>;
+                acquireChatRequestSlot: (
+                    requestId: string,
+                    queueTimeoutMs: number,
+                    token: vscode.CancellationToken
+                ) => Promise<{ release: () => void; waitMs: number }>;
+                sendChatCompletion: (
+                    serverUrl: string,
+                    headers: Record<string, string>,
+                    requestBody: Record<string, unknown>,
+                    timeoutMs: number,
+                    token: vscode.CancellationToken
+                ) => Promise<Response>;
+                processStreamingResponse: (
+                    responseBody: ReadableStream<Uint8Array>,
+                    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+                    token: vscode.CancellationToken
+                ) => Promise<void>;
+            };
+            const originals = {
+                getServerUrl: providerAny.getServerUrl,
+                getApiKey: providerAny.getApiKey,
+                getRuntimeContextLengthWithCache: providerAny.getRuntimeContextLengthWithCache,
+                acquireChatRequestSlot: providerAny.acquireChatRequestSlot,
+                sendChatCompletion: providerAny.sendChatCompletion,
+                processStreamingResponse: providerAny.processStreamingResponse,
+            };
+            const sentRequestBodies: Array<Record<string, unknown>> = [];
+            const reportedParts: vscode.LanguageModelResponsePart[] = [];
+            let streamInvocation = 0;
+            const emptyResponse = () => new Response(new ReadableStream<Uint8Array>({
+                start(controller) {
+                    controller.close();
+                },
+            }), { status: 200 });
+
+            try {
+                providerAny.getServerUrl = async () => "http://localhost:8000";
+                providerAny.getApiKey = async () => undefined;
+                providerAny.getRuntimeContextLengthWithCache = async () => 65536;
+                providerAny.acquireChatRequestSlot = async () => ({ release: () => undefined, waitMs: 0 });
+                providerAny.sendChatCompletion = async (_url, _headers, body) => {
+                    sentRequestBodies.push(JSON.parse(JSON.stringify(body)) as Record<string, unknown>);
+                    return emptyResponse();
+                };
+                providerAny.processStreamingResponse = async (_body, progress) => {
+                    streamInvocation += 1;
+                    if (streamInvocation === 1) {
+                        throw new ToolCallValidationError("$.path is required", "read_file", "schema");
+                    }
+                    progress.report(new vscode.LanguageModelTextPart("Recovered after correction"));
+                };
+
+                await provider.provideLanguageModelChatResponse(
+                    {
+                        id: "test-model",
+                        name: "test-model",
+                        family: "llama",
+                        version: "1",
+                        maxInputTokens: 32768,
+                        maxOutputTokens: 4096,
+                        capabilities: { toolCalling: true },
+                    } as unknown as vscode.LanguageModelChatInformation,
+                    [vscode.LanguageModelChatMessage.User("Read README")],
+                    {
+                        modelOptions: {},
+                        tools: [{
+                            name: "read_file",
+                            description: "Read a file",
+                            inputSchema: {
+                                type: "object",
+                                properties: { path: { type: "string" } },
+                                required: ["path"],
+                            },
+                        }],
+                        toolMode: vscode.LanguageModelChatToolMode.Auto,
+                    },
+                    { report: part => reportedParts.push(part) },
+                    new vscode.CancellationTokenSource().token
+                );
+            } finally {
+                providerAny.getServerUrl = originals.getServerUrl;
+                providerAny.getApiKey = originals.getApiKey;
+                providerAny.getRuntimeContextLengthWithCache = originals.getRuntimeContextLengthWithCache;
+                providerAny.acquireChatRequestSlot = originals.acquireChatRequestSlot;
+                providerAny.sendChatCompletion = originals.sendChatCompletion;
+                providerAny.processStreamingResponse = originals.processStreamingResponse;
+            }
+
+            assert.strictEqual(sentRequestBodies.length, 2);
+            const retryMessages = sentRequestBodies[1].messages as Array<{ role?: string; content?: string }>;
+            assert.strictEqual(retryMessages.at(-1)?.role, "user");
+            assert.ok(retryMessages.at(-1)?.content?.includes("previous tool call was rejected"));
+            assert.ok(retryMessages.at(-1)?.content?.includes("read_file"));
+            assert.ok(reportedParts.some(part =>
+                part instanceof vscode.LanguageModelTextPart && part.value === "Recovered after correction"
+            ));
         });
     });
 

@@ -20,6 +20,10 @@ VS Code language model provider. Stable compatibility ids remain under the
   authorization headers.
 - `src/memory/` owns durable shared memory, retrieval, prompt injection, and
   VS Code language model tools.
+- `src/tools/tool-call-reliability.ts` owns deterministic tool argument repair,
+  schema validation, metrics, and repeated identical-call detection.
+- `src/diagnostics/` owns provider health reports and session-quality
+  aggregation/rendering.
 - `src/context/context-budget.ts` owns pure soft/hard input budgets and context
   usage estimates shared by initial requests and overflow retries.
 - `src/context/copilot-compaction.ts` recognizes Copilot's internal summary
@@ -72,17 +76,20 @@ model provider surface. Update it explicitly with `npm run update-vscode-api`.
 6. VS Code messages and tools are converted to OpenAI format.
 7. The stable provider knowledge policy is prepended to native system
    instructions; Copilot compaction service requests skip this policy.
-8. Relevant shared memory is inserted immediately before the latest user turn,
-   preserving the stable cached prefix.
+8. Relevant non-expired memory for the active workspace/model scope is inserted
+   immediately before the latest user turn, preserving the stable cached prefix.
 9. Tool results are sanitized/summarized and the complete local prompt is
    counted with the active server template and tokenizer when available.
 10. The serial transport queue grants the request slot.
 11. The pure request builder applies local or DeepSeek fields, then the request
    is sent to the source-specific chat completion endpoint.
-12. SSE chunks are coalesced and emitted as text, thinking, or tool-call parts.
-13. The final upstream usage chunk is validated and emitted as native `usage`
+12. SSE chunks are coalesced; tool calls are repaired conservatively and
+   validated against the advertised schema before they are emitted to VS Code.
+13. A rejected tool call can trigger one bounded correction request when no
+   visible output or executable tool call has escaped the failed stream.
+14. The final upstream usage chunk is validated and emitted as native `usage`
    response data, with an estimate used only when the server omits it.
-14. Transient transport failures can retry only before streaming starts;
+15. Transient transport failures can retry only before streaming starts;
    context overflow, tool-role incompatibility, or empty output use separate
    bounded recovery paths.
 
@@ -91,6 +98,7 @@ model provider surface. Update it explicitly with `npm run update-vscode-api`.
 - API keys: VS Code `SecretStorage`.
 - Shared memory: `<globalStorage>/memory/shared-memory.json`.
 - Diagnostics: `<globalStorage>/logs/*.jsonl`.
+- Generated reports: `<globalStorage>/reports/*.{md,json}`.
 - User configuration: `llamacpp.*` VS Code settings.
 
 DeepSeek has a dedicated `llamacpp.deepSeekApiKey` secret. The generic primary
@@ -107,6 +115,9 @@ working.
   endpoints.
 - Memory content is reference data and cannot override current system/user
   instructions.
+- Externally verified memory requires source provenance and verification time;
+  expired memory is excluded from automatic retrieval.
+- Tool calls are never repaired by inventing values or changing argument types.
 - Knowledge policy and custom durable instructions stay before mutable history;
   source-aware tool descriptions remain stable across turns for cache reuse.
 - Logs may contain counts, timings, model ids, and tool names, but not API keys

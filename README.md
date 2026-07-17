@@ -31,6 +31,8 @@ keeping tool calling, streaming responses, context budgeting, and diagnostics.
   upstream stream cancellation so stopped turns release the llama.cpp slot.
 - Tool calling with OpenAI `tools` and `tool` result messages.
 - API Direct tool mode for compact tool schemas and prioritized tool selection.
+- Deterministic tool-call repair, advertised-schema validation, one bounded
+  model correction retry, and repeated identical-call loop protection.
 - Adaptive or strict knowledge verification for current, source-backed
   technical answers, plus an optional cache-stable custom system prompt.
 - DeepSeek thinking-mode support:
@@ -50,8 +52,10 @@ keeping tool calling, streaming responses, context budgeting, and diagnostics.
 - Status bar metrics for throughput and context usage.
 - Compact Quick Access sidebar with grouped connections, model behavior,
   memory, and diagnostics.
-- Shared memory with automatic relevance-based context injection and native
-  Agent mode tools for create, search, update, and delete operations.
+- Scoped shared memory with typed entries, provenance, expiry, hybrid
+  relevance retrieval, automatic context injection, and native Agent tools.
+- Read-only provider health checks and privacy-preserving session quality
+  reports in Quick Access.
 - Optional Copilot Chat patch for native context limits and session-scoped
   Thinking Effort controls on extension-provided models.
 
@@ -91,6 +95,10 @@ Recommended local defaults:
   "llamacpp.apiDirectMaxTools": 48,
   "llamacpp.apiDirectToolTokenBudget": 12000,
   "llamacpp.toolResultMode": "auto",
+  "llamacpp.toolCallRepairEnabled": true,
+  "llamacpp.validateToolCallSchema": true,
+  "llamacpp.toolCallRepairMaxAttempts": 1,
+  "llamacpp.toolLoopProtection": true,
   "llamacpp.localDefaultMaxOutputTokens": 32768,
   "llamacpp.maxOutputTokensCap": 131072
 }
@@ -195,6 +203,23 @@ Classic mode is still available:
 
 Use classic only if you need the unmodified full tool catalog and are willing to
 pay the extra token cost.
+
+## Tool-Call Reliability
+
+Before VS Code executes a model-produced tool call, the provider checks it
+against the exact tools and input schemas sent in that request. It can safely
+repair code fences, a balanced JSON object with surrounding text, trailing
+commas, and tool-name casing. It never invents missing required values or
+coerces argument types.
+
+Unknown tools and schema-invalid arguments are rejected before execution. When
+the model has not emitted visible output, the provider can make one correction
+request with the rejection reason and allowed tool names. Repeated consecutive
+calls with the same canonical arguments receive a loop guard that requires a
+different approach or an explicit blocker explanation.
+
+See [Reliability And Diagnostics](docs/RELIABILITY_DIAGNOSTICS.md) for exact
+behavior, metrics, and a repeatable agent benchmark.
 
 ## Knowledge Verification
 
@@ -365,9 +390,10 @@ Set `maxToolResultChars = 0` only when you explicitly need raw full tool output.
 
 ## Shared Memory
 
-Durable memory is owned by this extension. It is stored once
-in VS Code extension global storage and is therefore shared by local models,
-DeepSeek, chats, and workspaces on the same VS Code profile.
+Durable memory is owned by this extension and stored in VS Code extension
+global storage. Each entry can be global, limited to the current workspace, or
+limited to one model. Entries are typed as preferences, decisions,
+environment, workflow, externally verified facts, or other reference data.
 
 Relevant entries are automatically added immediately before the latest user
 turn with a separate budget. This preserves the stable conversation prefix for
@@ -381,6 +407,11 @@ llama.cpp prompt-cache reuse:
 }
 ```
 
+Search combines weighted exact terms with conservative fuzzy matching. Expired
+entries are excluded automatically, and an `externalFact` must include a source
+URL and verification timestamp. Old version-one memory files migrate to global
+`other` entries without losing content.
+
 The extension contributes three native Agent mode tools:
 
 - `llamacpp_store_memory` creates or updates a durable entry.
@@ -389,8 +420,9 @@ The extension contributes three native Agent mode tools:
 
 Writing and deleting memory requires VS Code tool confirmation. The model
 should store stable preferences, project decisions, environment facts, and
-reusable workflow knowledge. Secrets, unverified guesses, and temporary chat
-details should not be stored.
+reusable workflow knowledge. External claims should use provenance and an
+expiry time when they can become stale. Secrets, unverified guesses, and
+temporary chat details should not be stored.
 
 Use `Local LLM: Open Shared Memory` to inspect the JSON file and
 `Local LLM: Clear Shared Memory` to reset it. Saving a valid edited memory file
@@ -414,6 +446,9 @@ Logging is enabled by default but stream chunk logging is disabled by default.
 
 Useful commands:
 
+- `Local LLM: Run Provider Health Check`
+- `Local LLM: Open Session Quality Report`
+- `Local LLM: Reset Session Metrics`
 - `Local LLM: Open Logs Folder`
 - `Local LLM: Open Latest Log`
 - `Local LLM: Copy Latest Log Path`
@@ -424,6 +459,9 @@ Useful commands:
 
 Leave `logStreamChunks = false` during normal work. Turn it on only while
 debugging stream parsing because it duplicates generated text into JSONL logs.
+Health and session reports are written as Markdown and JSON under
+`<globalStorage>/reports/`. Session reports contain metrics and model ids, not
+message or tool-result bodies.
 
 ## Quick Access Sidebar
 
@@ -438,8 +476,8 @@ The tree itself is split into four stable groups:
 - `Connections`: primary/local endpoints, source toggles, and API setup;
 - `Model Behavior`: global thinking default, local reasoning cap, and tool modes;
 - `Memory`: shared memory state and destructive clear action;
-- `Diagnostics`: context/throughput metrics, logs, logging, and status bar
-  toggles.
+- `Diagnostics`: provider health, session quality, context/cache/throughput
+  metrics, logs, logging, and status bar toggles.
 
 Connections and model behavior start expanded. Memory and diagnostics start
 collapsed, while their descriptions still show the useful current state. Full
@@ -464,6 +502,9 @@ endpoint URLs are available as tooltips instead of stretching the sidebar.
 - `Local LLM: Set Knowledge Verification`
 - `Local LLM: Refresh Models`
 - `Local LLM: Open Copilot Model Picker`
+- `Local LLM: Run Provider Health Check`
+- `Local LLM: Open Session Quality Report`
+- `Local LLM: Reset Session Metrics`
 - `Local LLM: Open Logs Folder`
 - `Local LLM: Open Latest Log`
 - `Local LLM: Copy Latest Log Path`
@@ -514,6 +555,11 @@ Tools:
 - `llamacpp.maxToolResultChars`
 - `llamacpp.summarizeLargeToolResults`
 - `llamacpp.sanitizeToolResultArtifacts`
+- `llamacpp.toolCallRepairEnabled`
+- `llamacpp.validateToolCallSchema`
+- `llamacpp.toolCallRepairMaxAttempts`
+- `llamacpp.toolLoopProtection`
+- `llamacpp.toolLoopDetectionThreshold`
 
 Reasoning:
 
@@ -584,7 +630,7 @@ npm run package
 Install the local VSIX:
 
 ```sh
-code --install-extension .\llama-vscode-chat-1.2.0.vsix --force
+code --install-extension .\llama-vscode-chat-1.3.0.vsix --force
 ```
 
 After installing, run `Developer: Reload Window` in VS Code.
@@ -602,6 +648,8 @@ Runtime structure and the current refactoring roadmap are in
 [Architecture](docs/ARCHITECTURE.md) and [Project Audit](docs/AUDIT.md).
 Knowledge-source policy, cache behavior, and baseline methodology are in
 [Knowledge Verification And System Prompt](docs/KNOWLEDGE_VERIFICATION.md).
+Tool validation, health checks, session metrics, and the post-upgrade benchmark
+are documented in [Reliability And Diagnostics](docs/RELIABILITY_DIAGNOSTICS.md).
 
 ## References
 

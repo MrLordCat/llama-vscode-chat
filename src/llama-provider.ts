@@ -33,9 +33,16 @@ import {
 } from "./context/system-prompt";
 import { summarizeToolResultContent } from "./context/tool-result-summary";
 import { calculatePromptCacheUsage, estimateChatTokenUsage, type ChatTokenUsage } from "./context/usage";
+import {
+    calculateOverallHealth,
+    type HealthCheckItem,
+    type ProviderHealthReport,
+    type ProviderHealthSourceReport,
+} from "./diagnostics/provider-health";
 import { convertMessages, convertTools, validateRequest, type ToolCallingMode, type ToolResultMode } from "./utils";
 import { LlamaLogSink } from "./logger";
 import { buildMemoryQuery, injectSharedMemoryContext } from "./memory/prompt";
+import { getCurrentWorkspaceScopeId } from "./memory/scope";
 import type { SharedMemoryContextProvider, SharedMemoryPromptContext } from "./memory/types";
 import {
     createModelSources,
@@ -53,6 +60,12 @@ import {
 } from "./reasoning";
 import { buildChatCompletionRequest } from "./request/chat-request";
 import { SerialRequestQueue, type ChatRequestSlotLease } from "./transport/request-queue";
+import {
+    detectRepeatedToolCallLoop,
+    injectToolLoopGuard,
+    ToolCallValidationError,
+    type ToolCallReliabilityMetrics,
+} from "./tools/tool-call-reliability";
 import {
     getChatCompletionsEndpoint,
     getModelsEndpoint,
@@ -102,6 +115,12 @@ export interface LlamaChatTurnMetrics {
     cachedPromptTokens?: number;
     promptCacheHitPercent?: number;
     retriedAfterOverflow: boolean;
+    toolCalls: number;
+    repairedToolCalls: number;
+    rejectedToolCalls: number;
+    schemaRejectedToolCalls: number;
+    toolCallRepairRetries: number;
+    toolLoopDetected: boolean;
 }
 
 export interface LlamaChatContextUsageMetrics {
@@ -187,6 +206,174 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         this.serverTokenCounter.clear();
         this.log("models.refresh.requested");
         this._onDidChangeLanguageModelChatInformation.fire();
+    }
+
+    async runHealthCheck(extensionVersion: string, token: CancellationToken): Promise<ProviderHealthReport> {
+        const cfg = this.getConfig();
+        const configurationChecks: HealthCheckItem[] = [
+            {
+                id: "tool-call-repair",
+                label: "Tool-call repair",
+                status: cfg.get<boolean>("toolCallRepairEnabled", true) !== false ? "pass" : "warning",
+                detail: cfg.get<boolean>("toolCallRepairEnabled", true) !== false
+                    ? "Bounded deterministic repair and one correction retry are enabled."
+                    : "Disabled; malformed model tool calls can fail the turn.",
+            },
+            {
+                id: "tool-schema-validation",
+                label: "Tool schema validation",
+                status: cfg.get<boolean>("validateToolCallSchema", true) !== false ? "pass" : "warning",
+                detail: cfg.get<boolean>("validateToolCallSchema", true) !== false
+                    ? "Tool arguments are checked against the advertised schema before execution."
+                    : "Disabled; extra or missing arguments may reach VS Code tools.",
+            },
+            {
+                id: "tool-loop-protection",
+                label: "Tool loop protection",
+                status: cfg.get<boolean>("toolLoopProtection", true) !== false ? "pass" : "warning",
+                detail: cfg.get<boolean>("toolLoopProtection", true) !== false
+                    ? "Repeated identical calls are detected from conversation history."
+                    : "Disabled.",
+            },
+            {
+                id: "api-direct",
+                label: "API Direct",
+                status: String(cfg.get("toolCallingMode", "apiDirect")) === "apiDirect" ? "pass" : "warning",
+                detail: `Mode: ${String(cfg.get("toolCallingMode", "apiDirect"))}.`,
+            },
+            {
+                id: "knowledge-policy",
+                label: "Knowledge verification",
+                status: String(cfg.get("knowledgeMode", "adaptive")) === "off" ? "warning" : "pass",
+                detail: `Mode: ${String(cfg.get("knowledgeMode", "adaptive"))}.`,
+            },
+            {
+                id: "memory",
+                label: "Scoped shared memory",
+                status: cfg.get<boolean>("memoryEnabled", true) !== false ? "pass" : "info",
+                detail: cfg.get<boolean>("memoryEnabled", true) !== false
+                    ? "Enabled with scope, provenance, expiry, and hybrid retrieval."
+                    : "Disabled by configuration.",
+            },
+        ];
+
+        const sources = await this.getModelSources();
+        const sourceReports = await Promise.all(sources.map(async source => {
+            const checks: HealthCheckItem[] = [];
+            let models: LlamaCppModelInfo[] = [];
+            try {
+                models = await this.fetchModels(source.serverUrl, source.apiKey);
+                checks.push({
+                    id: "model-discovery",
+                    label: "Model discovery",
+                    status: models.length > 0 ? "pass" : "fail",
+                    detail: models.length > 0 ? `${models.length} model(s) returned.` : "The endpoint returned no models.",
+                });
+            } catch (error) {
+                checks.push({
+                    id: "model-discovery",
+                    label: "Model discovery",
+                    status: "fail",
+                    detail: error instanceof Error ? error.message : String(error),
+                });
+            }
+
+            const deprecatedAliases = models
+                .map(model => model.id)
+                .filter(id => id === "deepseek-chat" || id === "deepseek-reasoner");
+            if (deprecatedAliases.length > 0) {
+                checks.push({
+                    id: "deprecated-model-alias",
+                    label: "DeepSeek model aliases",
+                    status: "warning",
+                    detail: `${deprecatedAliases.join(", ")} are deprecated; select deepseek-v4-flash or deepseek-v4-pro.`,
+                });
+            }
+
+            if (isDeepSeekEndpoint(source.serverUrl)) {
+                checks.push(
+                    {
+                        id: "deepseek-cache",
+                        label: "Prompt cache",
+                        status: "info",
+                        detail: "DeepSeek disk context caching is automatic; hit/miss tokens are read from usage.",
+                    },
+                    {
+                        id: "deepseek-tokenizer",
+                        label: "Exact preflight tokenizer",
+                        status: "info",
+                        detail: "DeepSeek does not expose llama.cpp /apply-template and /tokenize; conservative preflight estimation is expected.",
+                    }
+                );
+            } else if (models.length > 0) {
+                const runtimeContext = await this.fetchRuntimeContextLength(source.serverUrl, source.apiKey);
+                checks.push({
+                    id: "runtime-context",
+                    label: "Runtime context",
+                    status: runtimeContext === undefined ? "warning" : "pass",
+                    detail: runtimeContext === undefined
+                        ? "The /slots runtime context probe is unavailable; configured/model fallback will be used."
+                        : `${runtimeContext} tokens reported by /slots.`,
+                });
+
+                const headers: Record<string, string> = {
+                    "User-Agent": this.userAgent,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                };
+                if (source.apiKey) {
+                    headers.Authorization = `Bearer ${source.apiKey}`;
+                }
+                const tokenCount = await this.serverTokenCounter.countChatPrompt({
+                    serverUrl: source.serverUrl,
+                    model: models[0].id,
+                    headers,
+                    messages: [{ role: "user", content: "health check" }],
+                    timeoutMs: this.clampInt(cfg.get("tokenizerTimeoutMs", 10000), 1000, 30000, 10000),
+                    cancellation: token,
+                });
+                checks.push({
+                    id: "exact-tokenizer",
+                    label: "Exact prompt tokenizer",
+                    status: tokenCount === undefined ? "warning" : "pass",
+                    detail: tokenCount === undefined
+                        ? "/apply-template or /tokenize is unavailable; heuristic fallback will be used."
+                        : `Template and tokenizer probe succeeded (${tokenCount} tokens).`,
+                });
+                checks.push({
+                    id: "local-prompt-cache",
+                    label: "Local prompt cache",
+                    status: cfg.get<boolean>("cachePrompt", true) !== false ? "pass" : "warning",
+                    detail: cfg.get<boolean>("cachePrompt", true) !== false
+                        ? "cache_prompt is enabled for local chat requests."
+                        : "cache_prompt is disabled.",
+                });
+            }
+
+            return {
+                key: source.key,
+                label: source.label,
+                serverUrl: source.serverUrl,
+                modelIds: models.map(model => model.id),
+                checks,
+            } satisfies ProviderHealthSourceReport;
+        }));
+
+        const allChecks = [...configurationChecks, ...sourceReports.flatMap(source => source.checks)];
+        const report: ProviderHealthReport = {
+            generatedAt: new Date().toISOString(),
+            extensionVersion,
+            vscodeVersion: vscode.version,
+            overallStatus: calculateOverallHealth(allChecks),
+            configurationChecks,
+            sources: sourceReports,
+        };
+        this.log("diagnostics.health.complete", {
+            overallStatus: report.overallStatus,
+            sourceCount: report.sources.length,
+            checks: allChecks.map(check => ({ id: check.id, status: check.status })),
+        });
+        return report;
     }
 
     private getConfig(): vscode.WorkspaceConfiguration {
@@ -1490,6 +1677,11 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             10,
             3
         );
+        const toolCallRepairEnabled = cfg.get<boolean>("toolCallRepairEnabled", true) !== false;
+        const validateToolCallSchema = cfg.get<boolean>("validateToolCallSchema", true) !== false;
+        const toolCallRepairMaxAttempts = this.clampInt(cfg.get("toolCallRepairMaxAttempts", 1), 0, 2, 1);
+        const toolLoopProtection = cfg.get<boolean>("toolLoopProtection", true) !== false;
+        const toolLoopDetectionThreshold = this.clampInt(cfg.get("toolLoopDetectionThreshold", 3), 2, 10, 3);
         const configuredContinuationPrompt = String(
             cfg.get(
                 "emptyResponseContinuationPrompt",
@@ -1569,6 +1761,11 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 emptyResponseAutoRetryMaxAttempts,
                 toolCallOnlyAutoretry,
                 toolCallOnlyAutoretryThreshold,
+                toolCallRepairEnabled,
+                validateToolCallSchema,
+                toolCallRepairMaxAttempts,
+                toolLoopProtection,
+                toolLoopDetectionThreshold,
                 emptyResponseContinuationPrompt,
                 requestedThinkingMode,
                 thinkingMode,
@@ -1594,13 +1791,23 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             apiDirectIncludeAllTools,
             apiDirectToolTokenBudget,
         });
+        const toolLoopDetection = toolLoopProtection
+            ? detectRepeatedToolCallLoop(inspectionMessages, toolLoopDetectionThreshold)
+            : undefined;
+        if (toolLoopDetection) {
+            this.log("chat.tools.loop_detected", { requestId, ...toolLoopDetection });
+        }
 
         let sharedMemoryContext: SharedMemoryPromptContext | undefined;
         if (sharedMemoryEnabled && sharedMemoryAutoInject && this.sharedMemory && !copilotCompactionRequest) {
             try {
                 sharedMemoryContext = await this.sharedMemory.buildPromptContext(
                     buildMemoryQuery(inspectionMessages),
-                    sharedMemoryMaxTokens
+                    sharedMemoryMaxTokens,
+                    {
+                        workspaceId: getCurrentWorkspaceScopeId(),
+                        modelId: requestModelId,
+                    }
                 );
                 this.log("chat.memory.context", {
                     requestId,
@@ -1608,6 +1815,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     entryCount: sharedMemoryContext?.entryCount ?? 0,
                     entryIds: sharedMemoryContext?.entryIds ?? [],
                     estimatedTokens: sharedMemoryContext?.estimatedTokens ?? 0,
+                    expiredEntryCount: sharedMemoryContext?.expiredEntryCount ?? 0,
                 });
             } catch (error) {
                 this.logError("chat.memory.context_error", error, { requestId });
@@ -1621,9 +1829,10 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             });
             const withKnowledge = injectKnowledgeSystemPrompt(converted, knowledgeSystemPrompt);
             const withMemory = injectSharedMemoryContext(withKnowledge, sharedMemoryContext?.text);
+            const withLoopGuard = injectToolLoopGuard(withMemory, toolLoopDetection);
             const profiled = useCopilotCompactionProfile
-                ? addCopilotCompactionLimit(withMemory, copilotCompactionMaxTokens)
-                : withMemory;
+                ? addCopilotCompactionLimit(withLoopGuard, copilotCompactionMaxTokens)
+                : withLoopGuard;
             return this.truncateToolResultMessages(
                 profiled,
                 maxToolResultChars,
@@ -2202,6 +2411,23 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
 
             let continuationRetryCount = 0;
             let consecutiveToolCallOnlyTurns = 0;
+            let toolCallRepairRetryCount = 0;
+            const reliabilityMetrics: ToolCallReliabilityMetrics = {
+                accepted: 0,
+                repaired: 0,
+                rejected: 0,
+                unknownTool: 0,
+                schemaRejected: 0,
+                loopDetected: Boolean(toolLoopDetection),
+            };
+            const mergeReliabilityMetrics = (metrics: ToolCallReliabilityMetrics): void => {
+                reliabilityMetrics.accepted += metrics.accepted;
+                reliabilityMetrics.repaired += metrics.repaired;
+                reliabilityMetrics.rejected += metrics.rejected;
+                reliabilityMetrics.unknownTool += metrics.unknownTool;
+                reliabilityMetrics.schemaRejected += metrics.schemaRejected;
+                reliabilityMetrics.loopDetected ||= metrics.loopDetected;
+            };
             let sourceMessages = convertForMode(activeToolResultMode);
             let finalAttempt: Extract<AttemptResult, { ok: true }> | undefined;
             let finalServerUsage: ChatTokenUsage | undefined;
@@ -2261,8 +2487,56 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     },
                 };
 
-                const roundServerUsage = await this.processStreamingResponse(responseBody, measuredProgress, token);
-                await streamLogTask;
+                this.configureToolCallReliability(cappedToolConfig.tools, {
+                    repairEnabled: toolCallRepairEnabled,
+                    validateSchema: validateToolCallSchema,
+                });
+                let roundServerUsage: ChatTokenUsage | undefined;
+                try {
+                    roundServerUsage = await this.processStreamingResponse(responseBody, measuredProgress, token);
+                    await streamLogTask;
+                    mergeReliabilityMetrics(this.consumeToolCallReliabilityMetrics());
+                } catch (error) {
+                    await streamLogTask;
+                    mergeReliabilityMetrics(this.consumeToolCallReliabilityMetrics());
+                    const canRetryToolCall =
+                        error instanceof ToolCallValidationError &&
+                        toolCallRepairEnabled &&
+                        toolCallRepairRetryCount < toolCallRepairMaxAttempts &&
+                        roundOutputChars === 0 &&
+                        roundToolCallParts === 0 &&
+                        !token.isCancellationRequested;
+                    if (!canRetryToolCall) {
+                        throw error;
+                    }
+
+                    toolCallRepairRetryCount += 1;
+                    const allowedNames = (cappedToolConfig.tools ?? [])
+                        .map(tool => tool.function.name)
+                        .slice(0, 32)
+                        .join(", ");
+                    this.log("chat.tools.validation_retry", {
+                        requestId,
+                        attemptNo: attempt.attemptNo,
+                        retry: toolCallRepairRetryCount,
+                        kind: error.kind,
+                        toolName: error.toolName,
+                        reason: error.message,
+                    });
+                    sourceMessages = [
+                        ...sourceMessages,
+                        {
+                            role: "user",
+                            content: [
+                                "Your previous tool call was rejected before execution.",
+                                `Reason: ${error.message}`,
+                                `Available tools: ${allowedNames || "none"}.`,
+                                "Retry once with an exact available tool name and a valid JSON object that follows its schema. Do not repeat the malformed call.",
+                            ].join("\n"),
+                        },
+                    ];
+                    continue;
+                }
 
                 if (
                     roundOutputChars === 0 &&
@@ -2399,6 +2673,12 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 cachedPromptTokens: promptCacheUsage?.cachedTokens,
                 promptCacheHitPercent: promptCacheUsage?.hitPercent,
                 retriedAfterOverflow: finalAttempt.retriedAfterOverflow,
+                toolCalls: emittedToolCallParts,
+                repairedToolCalls: reliabilityMetrics.repaired,
+                rejectedToolCalls: reliabilityMetrics.rejected,
+                schemaRejectedToolCalls: reliabilityMetrics.schemaRejected,
+                toolCallRepairRetries: toolCallRepairRetryCount,
+                toolLoopDetected: reliabilityMetrics.loopDetected,
             };
 
             this.log("chat.turn.complete", {
@@ -2406,6 +2686,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 attemptNo: finalAttempt.attemptNo,
                 retriedAfterOverflow: finalAttempt.retriedAfterOverflow,
                 continuationRetryCount,
+                toolCallReliability: reliabilityMetrics,
+                toolCallRepairRetryCount,
                 toolResultMode: activeToolResultMode,
                 contextUsage: latestContextUsage,
                 metrics,

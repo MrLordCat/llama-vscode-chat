@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/MrLordCat/llama-vscode-chat.git"
 	},
-	"version": "1.2.0",
+	"version": "1.3.0",
 	"engines": {
 		"vscode": "^1.104.0"
 	},
@@ -169,6 +169,35 @@
 					"minimum": 2,
 					"maximum": 10,
 					"description": "Number of consecutive tool-call-only turns before triggering an automatic task-summary nudge."
+				},
+				"llamacpp.toolCallRepairEnabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "Repair conservative tool-call JSON/name mistakes and retry one rejected tool call before failing the chat turn."
+				},
+				"llamacpp.validateToolCallSchema": {
+					"type": "boolean",
+					"default": true,
+					"description": "Validate model tool-call arguments against the exact schema advertised in the request before VS Code executes the tool."
+				},
+				"llamacpp.toolCallRepairMaxAttempts": {
+					"type": "number",
+					"default": 1,
+					"minimum": 0,
+					"maximum": 2,
+					"description": "Maximum model correction retries after a malformed, unknown, or schema-invalid tool call."
+				},
+				"llamacpp.toolLoopProtection": {
+					"type": "boolean",
+					"default": true,
+					"description": "Detect consecutive identical tool calls in conversation history and instruct the model to change approach instead of repeating them."
+				},
+				"llamacpp.toolLoopDetectionThreshold": {
+					"type": "number",
+					"default": 3,
+					"minimum": 2,
+					"maximum": 10,
+					"description": "Number of consecutive identical tool calls that activates loop protection."
 				},
 				"llamacpp.emptyResponseContinuationPrompt": {
 					"type": "string",
@@ -455,7 +484,33 @@
 						},
 						"pinned": {
 							"type": "boolean",
-							"description": "Always prioritize this entry for context injection."
+							"description": "Prioritize this entry after it passes scope, expiry, and relevance checks."
+						},
+						"scope": {
+							"type": "string",
+							"enum": ["global", "workspace", "model"],
+							"description": "Where this memory applies. Workspace scopeId is filled automatically when omitted."
+						},
+						"scopeId": {
+							"type": "string",
+							"description": "Workspace URI or model id for non-global memory. Required for model scope."
+						},
+						"kind": {
+							"type": "string",
+							"enum": ["preference", "decision", "environment", "workflow", "externalFact", "other"],
+							"description": "Semantic type. externalFact requires sourceUrl and verifiedAt."
+						},
+						"sourceUrl": {
+							"type": "string",
+							"description": "Primary source URL for an externally verified fact."
+						},
+						"verifiedAt": {
+							"type": "string",
+							"description": "ISO date/time when the external fact was verified."
+						},
+						"expiresAt": {
+							"type": "string",
+							"description": "Optional ISO date/time after which the entry is excluded from automatic retrieval."
 						}
 					},
 					"required": [
@@ -489,6 +544,19 @@
 							"minimum": 1,
 							"maximum": 50,
 							"description": "Maximum number of entries to return."
+						},
+						"modelId": {
+							"type": "string",
+							"description": "Optional model id used to include matching model-scoped entries."
+						},
+						"includeExpired": {
+							"type": "boolean",
+							"description": "Include expired entries for maintenance and review."
+						},
+						"scope": {
+							"type": "string",
+							"enum": ["global", "workspace", "model"],
+							"description": "Optionally restrict results to one memory scope."
 						}
 					},
 					"additionalProperties": false
@@ -596,6 +664,18 @@
 			{
 				"command": "llamacpp.openLogsFolder",
 				"title": "Local LLM: Open Logs Folder"
+			},
+			{
+				"command": "llamacpp.runHealthCheck",
+				"title": "Local LLM: Run Provider Health Check"
+			},
+			{
+				"command": "llamacpp.openSessionReport",
+				"title": "Local LLM: Open Session Quality Report"
+			},
+			{
+				"command": "llamacpp.resetSessionReport",
+				"title": "Local LLM: Reset Session Metrics"
 			},
 			{
 				"command": "llamacpp.openLatestLog",
