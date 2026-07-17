@@ -57,7 +57,7 @@ available; the configured fallback is used otherwise.
 ## Optional Bundle Patch
 
 `scripts/patch-copilot-chat.mjs` modifies Copilot Chat only for the `llamacpp`
-vendor. Patch v4 makes seven changes:
+vendor. Patch v5 makes eight changes:
 
 - `maxOutputTokens` uses the limit advertised by the selected model instead of
   the wrapper's fixed 8192-token value;
@@ -68,6 +68,8 @@ vendor. Patch v4 makes seven changes:
 - stale smaller per-session context overrides are ignored for this provider;
 - a smaller global Copilot summarization threshold is ignored in favor of the
   model's advertised prompt window;
+- Copilot does not reserve its full raw tool catalog before the provider has
+  selected and compacted the tools it will actually send;
 - proactive background LLM summarization is disabled for this provider, while
   foreground recovery remains available near the actual prompt limit.
 
@@ -112,13 +114,13 @@ Before writing, the patcher:
 1. checks the Copilot manifest and expected wrapper structure;
 2. requires every minified-code anchor to be unique;
 3. changes only the identified extension-endpoint class;
-4. applies three unique guarded Agent prompt-budget anchors for this vendor;
+4. applies four unique guarded Agent prompt-budget anchors for this vendor;
 5. validates the resulting JavaScript with `node --check`;
 6. creates `extension.js.llama-vscode-chat.backup` beside the bundle;
 7. records Copilot version and original/patched SHA-256 hashes in a JSON file.
 
-Applying patch v4 over patch v2 or v3 uses the preserved original backup rather
-than stacking edits on the already modified bundle.
+Applying patch v5 over patch v2, v3, or v4 uses the preserved original backup
+rather than stacking edits on the already modified bundle.
 
 The patch is deliberately fail-closed. If a Copilot update changes the bundle
 shape, the script stops instead of applying a broad replacement. VS Code

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.5 - 2026-07-17
+
+- Prevented Copilot from reserving its complete raw VS Code tool catalog before
+  the local provider applies bounded API Direct tool selection.
+- Stopped the resulting early foreground summary and immediate follow-up
+  summary loop observed around 41K tokens on a 131K Qwen context.
+
 ## 1.1.4 - 2026-07-17
 
 - Prevented Copilot's smaller global summarization threshold from triggering a

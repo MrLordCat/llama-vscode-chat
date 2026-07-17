@@ -3,9 +3,10 @@ import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-const PATCH_ID = "llama-vscode-chat:copilot-native-model-controls:v4";
+const PATCH_ID = "llama-vscode-chat:copilot-native-model-controls:v5";
 const PATCH_MARKER = `/* ${PATCH_ID} */`;
 const LEGACY_PATCH_MARKERS = [
+	"/* llama-vscode-chat:copilot-native-model-controls:v4 */",
 	"/* llama-vscode-chat:copilot-native-model-controls:v3 */",
 	"/* llama-vscode-chat:copilot-native-model-controls:v2 */",
 ];
@@ -221,6 +222,12 @@ function patchExtensionEndpointClass(source) {
 	);
 
 	let patched = source.slice(0, classStart) + classSource + source.slice(classEnd + 1);
+	patched = replacePatternOnce(
+		patched,
+		/([A-Za-z_$][\w$]*)=t\.tools\?\.availableTools,([A-Za-z_$][\w$]*)=!!this\.endpoint\.supportsToolSearch,([A-Za-z_$][\w$]*)=\1\?\.length\?await this\.endpoint\.acquireTokenizer\(\)\.countToolTokens\(\1\):0/,
+		'$1=t.tools?.availableTools,$2=!!this.endpoint.supportsToolSearch,$3=this.endpoint.modelProvider==="llamacpp"?0:$1?.length?await this.endpoint.acquireTokenizer().countToolTokens($1):0',
+		"extension endpoint host tool reservation"
+	);
 	patched = replacePatternOnce(
 		patched,
 		/([A-Za-z_$][\w$]*)=typeof ([A-Za-z_$][\w$]*)=="number"&&\2<this\.endpoint\.modelMaxPromptTokens\?\2:this\.endpoint\.modelMaxPromptTokens/,
