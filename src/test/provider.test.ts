@@ -1328,6 +1328,25 @@ suite("Llama.cpp Chat Provider Extension", () => {
             assert.ok(names.has("semantic_search"));
         });
 
+		test("convertTools gives source tools reproducible verification guidance", () => {
+			const out = convertTools(
+				{
+					toolMode: vscode.LanguageModelChatToolMode.Auto,
+					tools: [
+						{ name: "fetch_webpage", description: "Fetch a page", inputSchema: { type: "object" } },
+						{ name: "github_repo", description: "Read repository", inputSchema: { type: "object" } },
+						{ name: "github_text_search", description: "Search source", inputSchema: { type: "object" } },
+					],
+				} satisfies vscode.ProvideLanguageModelChatResponseOptions,
+				{ mode: "apiDirect", apiDirectIncludeAllTools: true, apiDirectMaxTools: 8 }
+			);
+
+			const byName = new Map((out.tools ?? []).map(tool => [tool.function.name, tool.function.description ?? ""]));
+			assert.ok(byName.get("fetch_webpage")?.includes("official documentation"));
+			assert.ok(byName.get("github_repo")?.includes("pinned tag or commit"));
+			assert.ok(byName.get("github_text_search")?.includes("authoritative"));
+		});
+
         test("convertTools apiDirect include-all respects max tools cap", () => {
             const out = convertTools(
                 {

@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/MrLordCat/llama-vscode-chat.git"
 	},
-	"version": "1.1.6",
+	"version": "1.2.0",
 	"engines": {
 		"vscode": "^1.104.0"
 	},
@@ -316,6 +316,21 @@
 					"maximum": 65536,
 					"description": "Approximate token ceiling for compact apiDirect tool definitions. High-priority tools are kept first."
 				},
+				"llamacpp.knowledgeMode": {
+					"type": "string",
+					"enum": [
+						"off",
+						"adaptive",
+						"strict"
+					],
+					"default": "adaptive",
+					"description": "Knowledge verification policy: adaptive checks material changing or uncertain claims, strict requires source-backed verification for external technical claims, and off disables the built-in policy."
+				},
+				"llamacpp.customSystemPrompt": {
+					"type": "string",
+					"default": "",
+					"markdownDescription": "Optional stable instructions appended to the provider system policy. Keep frequently changing task context in chat or memory so the prompt prefix remains cache-friendly."
+				},
 				"llamacpp.thinkingMode": {
 					"type": "string",
 					"enum": [
@@ -563,6 +578,10 @@
 			{
 				"command": "llamacpp.setToolCallingMode",
 				"title": "Local LLM: Set Tool Calling Mode"
+			},
+			{
+				"command": "llamacpp.setKnowledgeMode",
+				"title": "Local LLM: Set Knowledge Verification"
 			},
 			{
 				"command": "llamacpp.refreshModels",

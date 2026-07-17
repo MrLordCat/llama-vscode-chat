@@ -30,6 +30,8 @@ VS Code language model provider. Stable compatibility ids remain under the
   compaction with bounded structured summaries of old tool activity.
 - `src/context/server-token-counter.ts` owns llama.cpp chat-template application,
   exact tokenization, short-lived count caching, and unsupported-server fallback.
+- `src/context/system-prompt.ts` owns the stable knowledge-verification policy,
+  custom system instructions, and non-mutating prompt-prefix injection.
 - `src/context/tool-result-summary.ts` extracts bounded, non-secret structural
   facts shared by live tool-result truncation and history compaction.
 - `src/context/usage.ts` validates upstream token counters and builds the
@@ -68,17 +70,19 @@ model provider surface. Update it explicitly with `npm run update-vscode-api`.
 5. Internal Copilot compaction prompts are classified before normal request
    tuning so they cannot inherit the user's expensive reasoning profile.
 6. VS Code messages and tools are converted to OpenAI format.
-7. Relevant shared memory is inserted immediately before the latest user turn,
+7. The stable provider knowledge policy is prepended to native system
+   instructions; Copilot compaction service requests skip this policy.
+8. Relevant shared memory is inserted immediately before the latest user turn,
    preserving the stable cached prefix.
-8. Tool results are sanitized/summarized and the complete local prompt is
+9. Tool results are sanitized/summarized and the complete local prompt is
    counted with the active server template and tokenizer when available.
-9. The serial transport queue grants the request slot.
-10. The pure request builder applies local or DeepSeek fields, then the request
+10. The serial transport queue grants the request slot.
+11. The pure request builder applies local or DeepSeek fields, then the request
    is sent to the source-specific chat completion endpoint.
-11. SSE chunks are coalesced and emitted as text, thinking, or tool-call parts.
-12. The final upstream usage chunk is validated and emitted as native `usage`
-    response data, with an estimate used only when the server omits it.
-13. Transient transport failures can retry only before streaming starts;
+12. SSE chunks are coalesced and emitted as text, thinking, or tool-call parts.
+13. The final upstream usage chunk is validated and emitted as native `usage`
+   response data, with an estimate used only when the server omits it.
+14. Transient transport failures can retry only before streaming starts;
    context overflow, tool-role incompatibility, or empty output use separate
    bounded recovery paths.
 
@@ -103,6 +107,8 @@ working.
   endpoints.
 - Memory content is reference data and cannot override current system/user
   instructions.
+- Knowledge policy and custom durable instructions stay before mutable history;
+  source-aware tool descriptions remain stable across turns for cache reuse.
 - Logs may contain counts, timings, model ids, and tool names, but not API keys
   or raw message bodies.
 - Changes to conversion, compaction, streaming, routing, or memory require tests.

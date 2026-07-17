@@ -5,6 +5,7 @@ import type { ThinkingMode } from "../reasoning";
 
 type ToolResultMode = "auto" | "tool" | "user";
 type ToolCallingMode = "classic" | "apiDirect";
+type KnowledgeMode = "off" | "adaptive" | "strict";
 
 async function pickThinkingMode(current: ThinkingMode): Promise<ThinkingMode | undefined> {
 	const options: Array<{ label: string; description: string; value: ThinkingMode }> = [
@@ -45,6 +46,19 @@ async function pickToolCallingMode(current: ToolCallingMode): Promise<ToolCallin
 	const picked = await vscode.window.showQuickPick(
 		options.map(option => ({ ...option, detail: option.value === current ? "Current" : undefined })),
 		{ title: "Local LLM Tool Calling Mode", ignoreFocusOut: true }
+	);
+	return picked?.value;
+}
+
+async function pickKnowledgeMode(current: KnowledgeMode): Promise<KnowledgeMode | undefined> {
+	const options: Array<{ label: string; description: string; value: KnowledgeMode }> = [
+		{ label: "Adaptive", description: "Verify material changing or uncertain claims with primary sources", value: "adaptive" },
+		{ label: "Strict", description: "Require source-backed verification for external technical claims and audits", value: "strict" },
+		{ label: "Off", description: "Disable the built-in knowledge verification policy", value: "off" },
+	];
+	const picked = await vscode.window.showQuickPick(
+		options.map(option => ({ ...option, detail: option.value === current ? "Current" : undefined })),
+		{ title: "Local LLM Knowledge Verification", ignoreFocusOut: true }
 	);
 	return picked?.value;
 }
@@ -107,6 +121,17 @@ export function registerModelBehaviorCommands(refresh: () => void): vscode.Dispo
 			await config.update("toolCallingMode", next, vscode.ConfigurationTarget.Global);
 			refresh();
 			vscode.window.showInformationMessage(`Local LLM tool calling mode: ${next}`);
+		}),
+		vscode.commands.registerCommand("llamacpp.setKnowledgeMode", async () => {
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+			const current = String(config.get("knowledgeMode", "adaptive")) as KnowledgeMode;
+			const next = await pickKnowledgeMode(current);
+			if (!next) {
+				return;
+			}
+			await config.update("knowledgeMode", next, vscode.ConfigurationTarget.Global);
+			refresh();
+			vscode.window.showInformationMessage(`Local LLM knowledge verification: ${next}`);
 		}),
 	];
 }

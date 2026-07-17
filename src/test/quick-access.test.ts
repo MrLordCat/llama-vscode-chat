@@ -62,4 +62,15 @@ suite("quick access", () => {
 			"msg 20K + tools 2K + reserved 8K"
 		);
 	});
+
+	test("exposes knowledge verification with the other model controls", async () => {
+		const provider = new LlamaQuickActionsProvider(() => undefined, () => undefined, () => 0);
+		const modelBehavior = (await getItems(provider)).find(item => labelOf(item) === "Model Behavior");
+		assert.ok(modelBehavior);
+
+		const children = await getItems(provider, modelBehavior);
+		const knowledge = children.find(item => labelOf(item) === "Knowledge Verification");
+		assert.ok(knowledge);
+		assert.strictEqual(knowledge.command?.command, "llamacpp.setKnowledgeMode");
+	});
 });

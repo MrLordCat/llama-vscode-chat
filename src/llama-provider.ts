@@ -25,6 +25,12 @@ import { addCopilotCompactionLimit, isCopilotCompactionRequest } from "./context
 import { compactMessages } from "./context/message-compaction";
 import { resolveOutputTokenBudget } from "./context/output-budget";
 import { ServerTokenCounter } from "./context/server-token-counter";
+import {
+    buildKnowledgeSystemPrompt,
+    formatLocalDate,
+    injectKnowledgeSystemPrompt,
+    normalizeKnowledgeMode,
+} from "./context/system-prompt";
 import { summarizeToolResultContent } from "./context/tool-result-summary";
 import { calculatePromptCacheUsage, estimateChatTokenUsage, type ChatTokenUsage } from "./context/usage";
 import { convertMessages, convertTools, validateRequest, type ToolCallingMode, type ToolResultMode } from "./utils";
@@ -1515,6 +1521,15 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         const apiDirectMaxTools = this.clampInt(cfg.get("apiDirectMaxTools", 48), 1, 128, 48);
         const apiDirectIncludeAllTools = cfg.get<boolean>("apiDirectIncludeAllTools", false) === true;
         const apiDirectToolTokenBudget = this.clampInt(cfg.get("apiDirectToolTokenBudget", 12000), 256, 65536, 12000);
+        const knowledgeMode = normalizeKnowledgeMode(cfg.get("knowledgeMode", "adaptive"));
+        const customSystemPrompt = String(cfg.get("customSystemPrompt", "") ?? "").trim().slice(0, 12000);
+        const knowledgeSystemPrompt = copilotCompactionRequest
+            ? undefined
+            : buildKnowledgeSystemPrompt({
+                mode: knowledgeMode,
+                currentDate: formatLocalDate(new Date()),
+                customPrompt: customSystemPrompt,
+            });
         const sharedMemoryEnabled = cfg.get<boolean>("memoryEnabled", true) !== false;
         const sharedMemoryAutoInject = cfg.get<boolean>("memoryAutoInject", true) !== false;
         const sharedMemoryMaxTokens = this.clampInt(cfg.get("memoryMaxTokens", 4096), 128, 32768, 4096);
@@ -1565,6 +1580,9 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 apiDirectMaxTools,
                 apiDirectIncludeAllTools,
                 apiDirectToolTokenBudget,
+                knowledgeMode,
+                knowledgeSystemPromptChars: knowledgeSystemPrompt?.length ?? 0,
+                customSystemPromptChars: customSystemPrompt.length,
                 sharedMemoryEnabled,
                 sharedMemoryAutoInject,
                 sharedMemoryMaxTokens,
@@ -1601,7 +1619,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 toolResultMode: mode,
                 supportsImageInput: imageInputSupported,
             });
-            const withMemory = injectSharedMemoryContext(converted, sharedMemoryContext?.text);
+            const withKnowledge = injectKnowledgeSystemPrompt(converted, knowledgeSystemPrompt);
+            const withMemory = injectSharedMemoryContext(withKnowledge, sharedMemoryContext?.text);
             const profiled = useCopilotCompactionProfile
                 ? addCopilotCompactionLimit(withMemory, copilotCompactionMaxTokens)
                 : withMemory;

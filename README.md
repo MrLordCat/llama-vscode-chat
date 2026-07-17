@@ -31,6 +31,8 @@ keeping tool calling, streaming responses, context budgeting, and diagnostics.
   upstream stream cancellation so stopped turns release the llama.cpp slot.
 - Tool calling with OpenAI `tools` and `tool` result messages.
 - API Direct tool mode for compact tool schemas and prioritized tool selection.
+- Adaptive or strict knowledge verification for current, source-backed
+  technical answers, plus an optional cache-stable custom system prompt.
 - DeepSeek thinking-mode support:
   - `thinking.type`
   - `reasoning_effort`
@@ -193,6 +195,28 @@ Classic mode is still available:
 
 Use classic only if you need the unmodified full tool catalog and are willing to
 pay the extra token cost.
+
+## Knowledge Verification
+
+The default `adaptive` policy asks local models to verify material external
+claims when they may be outdated, version-specific, security-sensitive, or
+uncertain. It prefers official documentation and pinned source revisions,
+requires local file-and-line evidence for project audits, and keeps facts,
+inference, and assumptions distinct. `strict` applies those checks to all
+material external technical claims; `off` disables the built-in policy.
+
+```json
+{
+  "llamacpp.knowledgeMode": "adaptive",
+  "llamacpp.customSystemPrompt": ""
+}
+```
+
+The policy is placed at the stable beginning of the request. Retrieved memory
+remains near the latest user turn, preserving prompt-cache reuse. Source tools
+also receive concise hints to prefer official pages and pinned commits without
+dynamically changing the tool catalog between turns. See
+[Knowledge Verification And System Prompt](docs/KNOWLEDGE_VERIFICATION.md).
 
 ## DeepSeek Compatibility Notes
 
@@ -437,6 +461,7 @@ endpoint URLs are available as tooltips instead of stretching the sidebar.
 - `Local LLM: Set Local Reasoning Cap`
 - `Local LLM: Set Tool Result Mode`
 - `Local LLM: Set Tool Calling Mode`
+- `Local LLM: Set Knowledge Verification`
 - `Local LLM: Refresh Models`
 - `Local LLM: Open Copilot Model Picker`
 - `Local LLM: Open Logs Folder`
@@ -496,6 +521,11 @@ Reasoning:
 - `llamacpp.reasoningBudget`
 - `llamacpp.preserveThinking`
 
+Knowledge and instructions:
+
+- `llamacpp.knowledgeMode`
+- `llamacpp.customSystemPrompt`
+
 Memory:
 
 - `llamacpp.memoryEnabled`
@@ -554,7 +584,7 @@ npm run package
 Install the local VSIX:
 
 ```sh
-code --install-extension .\llama-vscode-chat-1.0.0.vsix --force
+code --install-extension .\llama-vscode-chat-1.2.0.vsix --force
 ```
 
 After installing, run `Developer: Reload Window` in VS Code.
@@ -570,6 +600,8 @@ continues to work. The Marketplace/local extension id is now
 The complete feature history and ownership boundaries are in [Fork Changes](docs/FORK_CHANGES.md).
 Runtime structure and the current refactoring roadmap are in
 [Architecture](docs/ARCHITECTURE.md) and [Project Audit](docs/AUDIT.md).
+Knowledge-source policy, cache behavior, and baseline methodology are in
+[Knowledge Verification And System Prompt](docs/KNOWLEDGE_VERIFICATION.md).
 
 ## References
 

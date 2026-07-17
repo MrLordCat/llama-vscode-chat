@@ -99,7 +99,8 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 			Number.isFinite(reasoningBudget) ? reasoningBudget : DEFAULT_LOCAL_REASONING_BUDGET
 		);
 		const toolResultMode = String(config.get("toolResultMode", "auto"));
-		const toolCallingMode = String(config.get("toolCallingMode", "classic"));
+		const toolCallingMode = String(config.get("toolCallingMode", "apiDirect"));
+		const knowledgeMode = String(config.get("knowledgeMode", "adaptive"));
 		const fileLoggingEnabled = config.get<boolean>("enableFileLogging", true) !== false;
 		const streamChunkLoggingEnabled = config.get<boolean>("logStreamChunks", false) === true;
 		const performanceStatusBarEnabled = config.get<boolean>("showPerformanceStatusBar", true) !== false;
@@ -152,7 +153,7 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 		});
 
 		const modelBehavior = new QuickAccessItem("modelBehavior", "Model Behavior", {
-			description: `${thinkingMode} · ${toolCallingMode}`,
+			description: `${thinkingMode} / ${toolCallingMode} / ${knowledgeMode}`,
 			icon: new vscode.ThemeIcon("settings-gear"),
 			expanded: true,
 			children: [
@@ -162,9 +163,9 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 					icon: new vscode.ThemeIcon("lightbulb"),
 					command: command("llamacpp.setThinkingMode", "Set Thinking Mode"),
 				}),
-			new QuickAccessItem("modelBehavior.reasoningBudget", "Local Reasoning Cap", {
-				description: `${effectiveReasoningBudget} tokens`,
-				tooltip: "Maximum hidden reasoning tokens for local models. Light uses up to 512, Balanced up to 2048, Deep/Auto use this cap. DeepSeek uses High/Max effort instead.",
+				new QuickAccessItem("modelBehavior.reasoningBudget", "Local Reasoning Cap", {
+					description: `${effectiveReasoningBudget} tokens`,
+					tooltip: "Maximum hidden reasoning tokens for local models. Light uses up to 512, Balanced up to 2048, Deep/Auto use this cap. DeepSeek uses High/Max effort instead.",
 					icon: new vscode.ThemeIcon("symbol-numeric"),
 					command: command("llamacpp.setReasoningBudget", "Set Reasoning Budget"),
 				}),
@@ -177,6 +178,12 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 					description: toolResultMode,
 					icon: new vscode.ThemeIcon("output"),
 					command: command("llamacpp.setToolResultMode", "Set Tool Result Mode"),
+				}),
+				new QuickAccessItem("modelBehavior.knowledge", "Knowledge Verification", {
+					description: knowledgeMode,
+					tooltip: "Controls when the model verifies changing external knowledge with primary sources.",
+					icon: new vscode.ThemeIcon("book"),
+					command: command("llamacpp.setKnowledgeMode", "Set Knowledge Verification"),
 				}),
 			],
 		});

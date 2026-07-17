@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.0 - 2026-07-17
+
+- Added adaptive and strict knowledge-verification modes for source-backed,
+  version-aware technical work with local models and DeepSeek.
+- Added a cache-stable custom system prompt and kept retrieved memory near the
+  mutable end of the request.
+- Added primary-source and pinned-revision guidance to web and GitHub tools
+  without prompt-dependent tool-catalog churn.
+- Exposed knowledge verification in Quick Access and documented a repeatable
+  before/after audit workflow.
+
 ## 1.1.6 - 2026-07-17
 
 - Disabled Copilot Agent's automatic LLM summarization for local provider

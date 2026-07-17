@@ -194,6 +194,12 @@ function getToolExecutionHint(name: string, hasRunInTerminal: boolean): string |
 			return hasRunInTerminal
 				? "Do not use this to create terminals or run shell commands. Use run_in_terminal instead."
 				: "Use only for VS Code UI commands, not shell command execution.";
+		case "fetch_webpage":
+			return "Use for live, source-backed verification. Prefer official documentation, specifications, release notes, and stable versioned pages; retain the direct URL and relevant version or publication date.";
+		case "github_repo":
+			return "Use to inspect upstream implementation when documented behavior is incomplete. Prefer a pinned tag or commit over a moving default branch and report the revision used.";
+		case "github_text_search":
+			return "Use to locate implementation evidence, then inspect the surrounding source at a pinned tag or commit before treating the match as authoritative.";
 		default:
 			return undefined;
 	}
@@ -626,9 +632,9 @@ export function convertTools(
 	const unbudgetedToolDefs: OpenAIFunctionToolDef[] = selectedTools.map((t) => {
 			const name = sanitizeFunctionName(t.name);
 			const descriptionBase = typeof t.description === "string" ? t.description : "";
-			const description = normalizeDescriptionForMode(
-				name,
-				appendToolDescription(descriptionBase, getToolExecutionHint(name, hasRunInTerminal))
+			const description = appendToolDescription(
+				normalizeDescriptionForMode(name, descriptionBase),
+				getToolExecutionHint(name, hasRunInTerminal)
 			);
 			const params = sanitizeSchema(t.inputSchema ?? { type: "object", properties: {} });
 			const normalizedParams = mode === "apiDirect"
