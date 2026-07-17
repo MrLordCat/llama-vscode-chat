@@ -27,13 +27,14 @@ There are two independent compaction layers:
   input target. It does not run inference.
 - Copilot Chat can generate an LLM summary of its outer conversation history.
 
-Patch v5 makes Copilot use the complete `maxInputTokens + maxOutputTokens`
+Patch v6 makes Copilot use the complete `maxInputTokens + maxOutputTokens`
 window for this provider, ignores smaller stale session and global summary
 threshold overrides, and avoids reserving Copilot's full raw tool catalog
-before the provider selects its bounded API Direct subset. It also disables
-proactive background summaries for `llamacpp`. Emergency foreground
-summarization remains available when Copilot can no longer render the full
-conversation.
+before the provider selects its bounded API Direct subset. The temporary Agent
+renderer is allowed to pass raw tool results through to the provider, where
+they are sanitized, counted, and deterministically compacted. Automatic Copilot
+LLM summaries are disabled for `llamacpp`; the explicit Compact Conversation
+command remains available.
 
 Recognized Copilot summary requests use `thinking=off`, skip shared-memory
 injection and prompt caching, and cap output with

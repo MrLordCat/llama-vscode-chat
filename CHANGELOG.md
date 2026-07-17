@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.6 - 2026-07-17
+
+- Disabled Copilot Agent's automatic LLM summarization for local provider
+  sessions while preserving the explicit Compact Conversation command.
+- Let the provider receive raw host history before enforcing its own exact
+  token budget, tool-result sanitization, and deterministic compaction.
+
 ## 1.1.5 - 2026-07-17
 
 - Prevented Copilot from reserving its complete raw VS Code tool catalog before

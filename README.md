@@ -263,9 +263,9 @@ Copilot Chat also has its own LLM-based conversation summarizer. The optional
 bundle patch keeps that outer summarizer from starting in the background for
 this provider, gives it the complete advertised context window, ignores smaller
 session and global summary thresholds, and prevents the unfiltered host tool
-catalog from consuming the budget before API Direct selection. Foreground
-summarization remains available near the real host limit. When Copilot does
-request one, the provider recognizes its internal prompt and uses a bounded
+catalog and raw tool results from consuming the host budget before provider
+sanitization. Automatic Copilot LLM summaries are disabled for local models;
+the explicit Compact Conversation command remains available and uses a bounded
 no-reasoning profile instead of the normal Qwen High/Deep profile.
 
 Important settings:
