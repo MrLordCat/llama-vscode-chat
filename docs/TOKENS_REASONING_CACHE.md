@@ -19,6 +19,26 @@ evenly between hidden reasoning and the visible answer.
 The provider reserves the resolved `max_tokens` while calculating available
 input context. A large hard ceiling no longer becomes the default reservation.
 
+## Copilot Conversation Compaction
+
+There are two independent compaction layers:
+
+- The provider performs deterministic message compaction near its exact local
+  input target. It does not run inference.
+- Copilot Chat can generate an LLM summary of its outer conversation history.
+
+Patch v3 makes Copilot use the complete `maxInputTokens + maxOutputTokens`
+window for this provider, ignores a smaller stale session context override, and
+disables proactive background summaries for `llamacpp`. Emergency foreground
+summarization remains available when Copilot can no longer render the full
+conversation.
+
+Recognized Copilot summary requests use `thinking=off`, skip shared-memory
+injection and prompt caching, and cap output with
+`llamacpp.copilotCompactionMaxTokens` (2048 by default). This avoids spending a
+normal 16K reasoning budget on a service summary and avoids replacing the main
+chat's useful cache entry with a large one-off summarization prefix.
+
 ## Thinking Mode Mapping
 
 | Mode | Local llama.cpp | DeepSeek |
@@ -73,6 +93,7 @@ llama.cpp reuses only the identical prefix of a prompt. The extension preserves
 that prefix in several ways:
 
 - `cache_prompt=true` is sent only to local sources.
+- One-off Copilot compaction requests deliberately use `cache_prompt=false`.
 - Tool definitions are priority-sorted, compacted, count-limited, and bounded
   by `apiDirectToolTokenBudget` so the catalog remains stable and affordable.
 - Retrieved shared memory is inserted immediately before the latest user turn,

@@ -3,8 +3,11 @@ import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-const PATCH_ID = "llama-vscode-chat:copilot-native-model-controls:v2";
+const PATCH_ID = "llama-vscode-chat:copilot-native-model-controls:v3";
 const PATCH_MARKER = `/* ${PATCH_ID} */`;
+const LEGACY_PATCH_MARKERS = [
+	"/* llama-vscode-chat:copilot-native-model-controls:v2 */",
+];
 const BACKUP_SUFFIX = ".llama-vscode-chat.backup";
 const METADATA_SUFFIX = ".llama-vscode-chat.patch.json";
 
@@ -132,6 +135,17 @@ function patchExtensionEndpointClass(source) {
 	}
 
 	let classSource = source.slice(classStart, classEnd + 1);
+	const promptTokensAnchor = "get modelMaxPromptTokens(){return this._maxTokens}";
+	const promptTokensReplacement =
+		'get modelMaxPromptTokens(){return this.languageModel.vendor==="llamacpp"?' +
+		'this._maxTokens+(this.languageModel.maxOutputTokens??0):this._maxTokens}';
+	classSource = replaceOnce(
+		classSource,
+		promptTokensAnchor,
+		promptTokensReplacement,
+		"extension endpoint full context budget"
+	);
+
 	const outputTokensAnchor = "get maxOutputTokens(){return 8192}";
 	const outputTokensReplacement =
 		'get maxOutputTokens(){return this.languageModel.vendor==="llamacpp"?' +
@@ -176,7 +190,34 @@ function patchExtensionEndpointClass(source) {
 		"extension endpoint modelOptions"
 	);
 
-	return source.slice(0, classStart) + classSource + source.slice(classEnd + 1);
+	const cloneAnchor =
+		"cloneWithTokenOverride(e){return this._instantiationService.createInstance(" +
+		`${className},{...this.languageModel,maxInputTokens:e})}`;
+	const cloneReplacement =
+		'cloneWithTokenOverride(e){let t=this.languageModel.vendor==="llamacpp"?' +
+		'Math.max(1,e-(this.languageModel.maxOutputTokens??0)):e;return this._instantiationService.createInstance(' +
+		`${className},{...this.languageModel,maxInputTokens:t})}`;
+	classSource = replaceOnce(
+		classSource,
+		cloneAnchor,
+		cloneReplacement,
+		"extension endpoint token override"
+	);
+
+	let patched = source.slice(0, classStart) + classSource + source.slice(classEnd + 1);
+	patched = replaceOnce(
+		patched,
+		'f=typeof A=="number"&&A<this.endpoint.modelMaxPromptTokens?A:this.endpoint.modelMaxPromptTokens',
+		'f=this.endpoint.modelProvider==="llamacpp"?this.endpoint.modelMaxPromptTokens:typeof A=="number"&&A<this.endpoint.modelMaxPromptTokens?A:this.endpoint.modelMaxPromptTokens',
+		"extension endpoint session context override"
+	);
+	patched = replaceOnce(
+		patched,
+		'B=_?this._getOrCreateBackgroundSummarizer(t.conversation?.sessionId):void 0',
+		'B=_&&this.endpoint.modelProvider!=="llamacpp"?this._getOrCreateBackgroundSummarizer(t.conversation?.sessionId):void 0',
+		"extension endpoint background compaction"
+	);
+	return patched;
 }
 
 function printStatus(target) {
@@ -191,14 +232,19 @@ function printStatus(target) {
 function applyPatch(target, force) {
 	const backupPath = target.bundlePath + BACKUP_SUFFIX;
 	const metadataPath = target.bundlePath + METADATA_SUFFIX;
-	const original = fs.readFileSync(target.bundlePath, "utf8");
-	if (original.includes(PATCH_MARKER)) {
+	const installed = fs.readFileSync(target.bundlePath, "utf8");
+	if (installed.includes(PATCH_MARKER)) {
 		console.log("Copilot Chat patch is already applied.");
 		printStatus(target);
 		return;
 	}
+	const upgradingLegacyPatch = LEGACY_PATCH_MARKERS.some(marker => installed.includes(marker));
+	if (upgradingLegacyPatch && !fs.existsSync(backupPath)) {
+		throw new Error("Cannot upgrade the legacy Copilot patch because its original bundle backup is missing.");
+	}
+	const original = upgradingLegacyPatch ? fs.readFileSync(backupPath, "utf8") : installed;
 
-	if (fs.existsSync(backupPath) && !force) {
+	if (fs.existsSync(backupPath) && !force && !upgradingLegacyPatch) {
 		throw new Error(`Backup already exists: ${backupPath}. Restore it first or use --force after inspecting it.`);
 	}
 
@@ -211,7 +257,7 @@ function applyPatch(target, force) {
 		throw new Error(`Patched Copilot bundle failed syntax validation:\n${validation.stderr || validation.stdout}`);
 	}
 
-	if (!fs.existsSync(backupPath) || force) {
+	if (!fs.existsSync(backupPath) || (force && !upgradingLegacyPatch)) {
 		fs.copyFileSync(target.bundlePath, backupPath);
 	}
 	fs.writeFileSync(target.bundlePath, patched);

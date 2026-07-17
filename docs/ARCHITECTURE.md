@@ -22,6 +22,8 @@ VS Code language model provider. Stable compatibility ids remain under the
   VS Code language model tools.
 - `src/context/context-budget.ts` owns pure soft/hard input budgets and context
   usage estimates shared by initial requests and overflow retries.
+- `src/context/copilot-compaction.ts` recognizes Copilot's internal summary
+  requests and applies a bounded no-reasoning service profile.
 - `src/context/output-budget.ts` separates normal per-source output defaults
   from explicit request limits and the global hard ceiling.
 - `src/context/message-compaction.ts` owns deterministic non-mutating history
@@ -63,18 +65,20 @@ model provider surface. Update it explicitly with `npm run update-vscode-api`.
 3. For a chat turn, the model id selects the source and credentials.
 4. A session-scoped native reasoning selection overrides the global mode when
    Copilot supplies it through `modelOptions`.
-5. VS Code messages and tools are converted to OpenAI format.
-6. Relevant shared memory is inserted immediately before the latest user turn,
+5. Internal Copilot compaction prompts are classified before normal request
+   tuning so they cannot inherit the user's expensive reasoning profile.
+6. VS Code messages and tools are converted to OpenAI format.
+7. Relevant shared memory is inserted immediately before the latest user turn,
    preserving the stable cached prefix.
-7. Tool results are sanitized/summarized and the complete local prompt is
+8. Tool results are sanitized/summarized and the complete local prompt is
    counted with the active server template and tokenizer when available.
-8. The serial transport queue grants the request slot.
-9. The pure request builder applies local or DeepSeek fields, then the request
+9. The serial transport queue grants the request slot.
+10. The pure request builder applies local or DeepSeek fields, then the request
    is sent to the source-specific chat completion endpoint.
-10. SSE chunks are coalesced and emitted as text, thinking, or tool-call parts.
-11. The final upstream usage chunk is validated and emitted as native `usage`
+11. SSE chunks are coalesced and emitted as text, thinking, or tool-call parts.
+12. The final upstream usage chunk is validated and emitted as native `usage`
     response data, with an estimate used only when the server omits it.
-12. Transient transport failures can retry only before streaming starts;
+13. Transient transport failures can retry only before streaming starts;
    context overflow, tool-role incompatibility, or empty output use separate
    bounded recovery paths.
 

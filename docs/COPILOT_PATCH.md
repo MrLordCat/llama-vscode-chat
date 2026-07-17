@@ -56,14 +56,18 @@ available; the configured fallback is used otherwise.
 
 ## Optional Bundle Patch
 
-`scripts/patch-copilot-chat.mjs` modifies only Copilot Chat's wrapper for the
-`llamacpp` vendor. Patch v2 makes three changes:
+`scripts/patch-copilot-chat.mjs` modifies Copilot Chat only for the `llamacpp`
+vendor. Patch v3 makes six changes:
 
 - `maxOutputTokens` uses the limit advertised by the selected model instead of
   the wrapper's fixed 8192-token value;
 - `supportsReasoningEffort` exposes native session choices;
-- the selected effort is forwarded as `modelOptions.reasoningEffort` to this
-  extension.
+- the selected effort is forwarded as `modelOptions.reasoningEffort`;
+- prompt rendering uses the complete advertised context window instead of
+  treating the output reservation as permanently unavailable input;
+- stale smaller per-session context overrides are ignored for this provider;
+- proactive background LLM summarization is disabled for this provider, while
+  foreground recovery remains available near the actual prompt limit.
 
 The extension maps native values to its request modes:
 
@@ -106,9 +110,13 @@ Before writing, the patcher:
 1. checks the Copilot manifest and expected wrapper structure;
 2. requires every minified-code anchor to be unique;
 3. changes only the identified extension-endpoint class;
-4. validates the resulting JavaScript with `node --check`;
-5. creates `extension.js.llama-vscode-chat.backup` beside the bundle;
-6. records Copilot version and original/patched SHA-256 hashes in a JSON file.
+4. applies two unique guarded Agent prompt-budget anchors for this vendor;
+5. validates the resulting JavaScript with `node --check`;
+6. creates `extension.js.llama-vscode-chat.backup` beside the bundle;
+7. records Copilot version and original/patched SHA-256 hashes in a JSON file.
+
+Applying patch v3 over patch v2 uses the preserved original backup rather than
+stacking edits on the already modified bundle.
 
 The patch is deliberately fail-closed. If a Copilot update changes the bundle
 shape, the script stops instead of applying a broad replacement. VS Code

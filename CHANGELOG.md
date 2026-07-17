@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.3 - 2026-07-17
+
+- Prevented Copilot Chat from starting background LLM compaction early for
+  extension-contributed local models.
+- Made the guarded Copilot patch use the provider's complete context window and
+  ignore stale smaller session context overrides for `llamacpp`.
+- Added a fast service profile for unavoidable Copilot summaries: no reasoning,
+  no memory injection or prompt caching, and a configurable 2048-token cap.
+- Added regression coverage for native Copilot compaction prompt detection.
+
 ## 1.0.1 - 2026-07-16
 
 - Increased the default local High/Deep reasoning cap from 8192 to 16384

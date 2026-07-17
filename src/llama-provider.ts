@@ -21,6 +21,7 @@ import {
     DEFAULT_SERVER_URL,
 } from "./constants";
 import { calculateContextBudget, estimateContextUsage } from "./context/context-budget";
+import { addCopilotCompactionLimit, isCopilotCompactionRequest } from "./context/copilot-compaction";
 import { compactMessages } from "./context/message-compaction";
 import { resolveOutputTokenBudget } from "./context/output-budget";
 import { ServerTokenCounter } from "./context/server-token-counter";
@@ -1419,6 +1420,17 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         const requestId = randomUUID();
         const turnStartedAt = Date.now();
         const resolvedFamily = this.resolveModelFamily(requestModelId, source.familyOverride);
+        const imageInputSupported = model.capabilities?.imageInput === true;
+        const processedMessages = imageInputSupported
+            ? messages
+            : this.saveUserImagesToTemp(messages, requestId);
+
+        validateRequest(processedMessages);
+        const inspectionMessages = convertMessages(processedMessages, {
+            toolResultMode: "user",
+            supportsImageInput: imageInputSupported,
+        });
+        const copilotCompactionRequest = isCopilotCompactionRequest(inspectionMessages);
 
         let firstOutputAt: number | undefined;
         let emittedParts = 0;
@@ -1444,7 +1456,15 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         const requestQueueTimeoutMs = this.getRequestQueueTimeoutMs();
         const transientRetryMaxAttempts = this.clampInt(cfg.get("transientRetryMaxAttempts", 2), 0, 3, 2);
         const transientRetryBaseDelayMs = this.clampInt(cfg.get("transientRetryBaseDelayMs", 500), 100, 10000, 500);
-        const cachePrompt = this.getCachePromptEnabled();
+        const copilotCompactionFastMode = cfg.get<boolean>("copilotCompactionFastMode", true) !== false;
+        const copilotCompactionMaxTokens = this.clampInt(
+            cfg.get("copilotCompactionMaxTokens", 2048),
+            512,
+            8192,
+            2048
+        );
+        const useCopilotCompactionProfile = copilotCompactionRequest && copilotCompactionFastMode;
+        const cachePrompt = this.getCachePromptEnabled() && !useCopilotCompactionProfile;
         const maxToolResultChars = this.getMaxToolResultChars();
         const autoCompact = cfg.get<boolean>("autoCompact", true) !== false;
         const accurateTokenCounting = cfg.get<boolean>("accurateTokenCounting", true) !== false;
@@ -1474,10 +1494,11 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             configuredContinuationPrompt.length > 0
                 ? configuredContinuationPrompt
                 : "Continue from your previous response and complete the answer. Do not repeat already completed parts.";
-        const thinkingMode = resolveRequestThinkingMode(
+        const requestedThinkingMode = resolveRequestThinkingMode(
             cfg.get("thinkingMode", "auto"),
             options.modelOptions
         );
+        const thinkingMode = useCopilotCompactionProfile ? "off" : requestedThinkingMode;
         const configuredReasoningBudget = this.clampInt(
             cfg.get("reasoningBudget", DEFAULT_LOCAL_REASONING_BUDGET),
             256,
@@ -1485,7 +1506,8 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             DEFAULT_LOCAL_REASONING_BUDGET
         );
         const reasoningBudget = resolveReasoningBudget(thinkingMode, configuredReasoningBudget);
-        const preserveThinking = resolvedFamily === "qwen"
+        const preserveThinking = !useCopilotCompactionProfile
+            && resolvedFamily === "qwen"
             && /qwen3[._-]?6/i.test(requestModelId)
             && cfg.get<boolean>("preserveThinking", true) !== false;
         const toolResultModeConfig = this.normalizeToolResultMode(cfg.get("toolResultMode", "auto"));
@@ -1519,6 +1541,9 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 transientRetryMaxAttempts,
                 transientRetryBaseDelayMs,
                 cachePrompt,
+                copilotCompactionRequest,
+                copilotCompactionFastMode,
+                copilotCompactionMaxTokens,
                 maxToolResultChars,
                 runtimeContextLength,
                 autoCompact,
@@ -1530,6 +1555,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 toolCallOnlyAutoretry,
                 toolCallOnlyAutoretryThreshold,
                 emptyResponseContinuationPrompt,
+                requestedThinkingMode,
                 thinkingMode,
                 configuredReasoningBudget,
                 reasoningBudget,
@@ -1544,14 +1570,6 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 sharedMemoryMaxTokens,
             },
         });
-        // Save any user-attached images to temp files so the model can inspect them
-        // via the view_image tool (DeepSeek API doesn't support inline image_url).
-        const imageInputSupported = model.capabilities?.imageInput === true;
-        const processedMessages = imageInputSupported
-            ? messages
-            : this.saveUserImagesToTemp(messages, requestId);
-
-        validateRequest(processedMessages);
         const toolConfig = convertTools(options, {
             mode: toolCallingModeConfig as ToolCallingMode,
             apiDirectMaxTools,
@@ -1560,14 +1578,10 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         });
 
         let sharedMemoryContext: SharedMemoryPromptContext | undefined;
-        if (sharedMemoryEnabled && sharedMemoryAutoInject && this.sharedMemory) {
-            const queryMessages = convertMessages(processedMessages, {
-                toolResultMode: "user",
-                supportsImageInput: imageInputSupported,
-            });
+        if (sharedMemoryEnabled && sharedMemoryAutoInject && this.sharedMemory && !copilotCompactionRequest) {
             try {
                 sharedMemoryContext = await this.sharedMemory.buildPromptContext(
-                    buildMemoryQuery(queryMessages),
+                    buildMemoryQuery(inspectionMessages),
                     sharedMemoryMaxTokens
                 );
                 this.log("chat.memory.context", {
@@ -1587,8 +1601,12 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 toolResultMode: mode,
                 supportsImageInput: imageInputSupported,
             });
+            const withMemory = injectSharedMemoryContext(converted, sharedMemoryContext?.text);
+            const profiled = useCopilotCompactionProfile
+                ? addCopilotCompactionLimit(withMemory, copilotCompactionMaxTokens)
+                : withMemory;
             return this.truncateToolResultMessages(
-                injectSharedMemoryContext(converted, sharedMemoryContext?.text),
+                profiled,
                 maxToolResultChars,
                 requestId
             );
@@ -1632,9 +1650,14 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             deepSeekDefault: this.clampInt(cfg.get("deepSeekDefaultMaxOutputTokens", 65536), 1024, 393216, 65536),
             deepSeekMaximum: DEEPSEEK_MAX_OUTPUT_TOKENS,
         });
-        const { defaultMaxTokens: defaultMaxOutputTokens, requestedMaxTokens, maxTokens } = outputBudget;
+        const { defaultMaxTokens: defaultMaxOutputTokens, requestedMaxTokens } = outputBudget;
+        const maxTokens = useCopilotCompactionProfile
+            ? Math.min(outputBudget.maxTokens, copilotCompactionMaxTokens)
+            : outputBudget.maxTokens;
         const temperatureDefault = resolvedFamily === "deepseek" ? 1.0 : resolvedFamily === "qwen" ? 0.6 : 0.7;
-        const temperature = this.clampNumber(options.modelOptions?.temperature ?? temperatureDefault, 0, 2, temperatureDefault);
+        const temperature = useCopilotCompactionProfile
+            ? 0.2
+            : this.clampNumber(options.modelOptions?.temperature ?? temperatureDefault, 0, 2, temperatureDefault);
         const rawModelOptions = options.modelOptions as Record<string, unknown> | undefined;
         const qwenTopP = resolvedFamily === "qwen" ? 0.95 : undefined;
         const qwenTopK = resolvedFamily === "qwen" ? 20 : undefined;
@@ -1667,6 +1690,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             requestedMaxTokens,
             defaultMaxOutputTokens,
             requestProvidedOutputLimit: outputBudget.requestProvidedLimit,
+            requestKind: copilotCompactionRequest ? "copilot-compaction" : "chat",
             cappedTools: Array.isArray(cappedToolConfig.tools) ? cappedToolConfig.tools.length : 0,
         });
 
