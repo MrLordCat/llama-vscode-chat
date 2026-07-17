@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.4 - 2026-07-17
+
+- Prevented Copilot's smaller global summarization threshold from triggering a
+  foreground LLM compaction well before a local model's advertised context
+  limit.
+- Upgraded the guarded Copilot bundle patch to v4 while preserving emergency
+  foreground recovery at the real prompt limit.
+
 ## 1.1.3 - 2026-07-17
 
 - Prevented Copilot Chat from starting background LLM compaction early for

@@ -3,9 +3,10 @@ import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-const PATCH_ID = "llama-vscode-chat:copilot-native-model-controls:v3";
+const PATCH_ID = "llama-vscode-chat:copilot-native-model-controls:v4";
 const PATCH_MARKER = `/* ${PATCH_ID} */`;
 const LEGACY_PATCH_MARKERS = [
+	"/* llama-vscode-chat:copilot-native-model-controls:v3 */",
 	"/* llama-vscode-chat:copilot-native-model-controls:v2 */",
 ];
 const BACKUP_SUFFIX = ".llama-vscode-chat.backup";
@@ -112,6 +113,21 @@ function replaceOnce(source, search, replacement, description) {
 	return source.slice(0, first) + replacement + source.slice(first + search.length);
 }
 
+function replacePatternOnce(source, pattern, replacement, description) {
+	const flags = pattern.flags.replaceAll("g", "");
+	const matcher = new RegExp(pattern.source, flags);
+	const first = matcher.exec(source);
+	if (!first || first.index === undefined) {
+		throw new Error(`Copilot bundle shape changed: ${description} was not found.`);
+	}
+	const tail = source.slice(first.index + first[0].length);
+	if (matcher.test(tail)) {
+		throw new Error(`Copilot bundle shape changed: ${description} is not unique.`);
+	}
+	const replaced = first[0].replace(new RegExp(pattern.source, flags), replacement);
+	return source.slice(0, first.index) + replaced + source.slice(first.index + first[0].length);
+}
+
 function patchExtensionEndpointClass(source) {
 	if (source.includes(PATCH_MARKER)) {
 		return source;
@@ -205,11 +221,17 @@ function patchExtensionEndpointClass(source) {
 	);
 
 	let patched = source.slice(0, classStart) + classSource + source.slice(classEnd + 1);
-	patched = replaceOnce(
+	patched = replacePatternOnce(
 		patched,
-		'f=typeof A=="number"&&A<this.endpoint.modelMaxPromptTokens?A:this.endpoint.modelMaxPromptTokens',
-		'f=this.endpoint.modelProvider==="llamacpp"?this.endpoint.modelMaxPromptTokens:typeof A=="number"&&A<this.endpoint.modelMaxPromptTokens?A:this.endpoint.modelMaxPromptTokens',
+		/([A-Za-z_$][\w$]*)=typeof ([A-Za-z_$][\w$]*)=="number"&&\2<this\.endpoint\.modelMaxPromptTokens\?\2:this\.endpoint\.modelMaxPromptTokens/,
+		'$1=this.endpoint.modelProvider==="llamacpp"?this.endpoint.modelMaxPromptTokens:typeof $2=="number"&&$2<this.endpoint.modelMaxPromptTokens?$2:this.endpoint.modelMaxPromptTokens',
 		"extension endpoint session context override"
+	);
+	patched = replacePatternOnce(
+		patched,
+		/([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\.Advanced\.SummarizeAgentConversationHistoryThreshold\.id\),([A-Za-z_$][\w$]*)=Math\.min\(\1\?\?\4,\4\)/,
+		'$1=$2($3,$4,$5.Advanced.SummarizeAgentConversationHistoryThreshold.id),$6=this.endpoint.modelProvider==="llamacpp"?$4:Math.min($1??$4,$4)',
+		"extension endpoint summarization threshold"
 	);
 	patched = replaceOnce(
 		patched,

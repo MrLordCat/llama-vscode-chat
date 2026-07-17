@@ -261,11 +261,11 @@ to distinguish from history processing.
 
 Copilot Chat also has its own LLM-based conversation summarizer. The optional
 bundle patch keeps that outer summarizer from starting in the background for
-this provider, gives it the complete advertised context window, and leaves
-foreground summarization available near the real host limit. When Copilot does
-request a foreground summary, the provider recognizes its internal prompt and
-uses a bounded no-reasoning profile instead of the normal Qwen High/Deep
-profile.
+this provider, gives it the complete advertised context window, ignores smaller
+session and global summary thresholds, and leaves foreground summarization
+available near the real host limit. When Copilot does request a foreground
+summary, the provider recognizes its internal prompt and uses a bounded
+no-reasoning profile instead of the normal Qwen High/Deep profile.
 
 Important settings:
 
