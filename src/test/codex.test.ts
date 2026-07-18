@@ -3,14 +3,19 @@ import * as vscode from "vscode";
 
 import { CodexAppServerClient, JsonLineBuffer, type CodexServerNotification } from "../codex/app-server-client";
 import { CompositeChatModelProvider } from "../composite-provider";
-import { CodexChatModelProvider } from "../codex/codex-provider";
-import { buildCodexDynamicTools, CODEX_DEFERRED_TOOL_NAMESPACE } from "../codex/dynamic-tools";
+import { canResumeCodexToolTurn, CodexChatModelProvider } from "../codex/codex-provider";
+import {
+	buildCodexDynamicTools,
+	CODEX_DEFERRED_TOOL_NAMESPACE,
+	CODEX_NATIVE_TOOL_NAMESPACE,
+} from "../codex/dynamic-tools";
 import {
 	createCodexConversationAnchor,
 	convertCodexToolResult,
 	findCodexConversationTail,
 	findCodexToolContinuation,
 	findCodexToolContinuations,
+	matchCodexConversationTail,
 	serializeCodexConversation,
 } from "../codex/message-adapter";
 import {
@@ -374,6 +379,25 @@ suite("Codex subscription provider", () => {
 		assert.deepStrictEqual(new Set(matches.map(match => match.callId)), new Set(["call-a", "call-b"]));
 	});
 
+	test("keeps an active Codex tool turn when the outer tool catalog changes", () => {
+		const active = { modelId: "gpt-test", runtimeKey: "catalog-before", processGeneration: 3 };
+		assert.strictEqual(canResumeCodexToolTurn(active, {
+			modelId: "gpt-test",
+			runtimeKey: "catalog-after",
+			processGeneration: 3,
+		}), true);
+		assert.strictEqual(canResumeCodexToolTurn(active, {
+			modelId: "different-model",
+			runtimeKey: "catalog-after",
+			processGeneration: 3,
+		}), false);
+		assert.strictEqual(canResumeCodexToolTurn(active, {
+			modelId: "gpt-test",
+			runtimeKey: "catalog-after",
+			processGeneration: 4,
+		}), false);
+	});
+
 	test("bounds native tool output before returning it to the active Codex turn", () => {
 		const result = new vscode.LanguageModelToolResultPart("call", [
 			new vscode.LanguageModelTextPart(`HEAD\n${"x".repeat(20_000)}\nTAIL`),
@@ -405,6 +429,45 @@ suite("Codex subscription provider", () => {
 			vscode.LanguageModelChatMessage.User("follow-up request"),
 		];
 		assert.strictEqual(findCodexConversationTail(edited, anchor), undefined);
+	});
+
+	test("reuses a completed conversation when Copilot rewrites only older service context", () => {
+		const original = [
+			vscode.LanguageModelChatMessage.User("service context version one"),
+			vscode.LanguageModelChatMessage.User("original request"),
+		];
+		const anchor = createCodexConversationAnchor(original, "completed answer");
+		const nextTurn = [
+			vscode.LanguageModelChatMessage.User("service context version two"),
+			vscode.LanguageModelChatMessage.User("original request"),
+			vscode.LanguageModelChatMessage.Assistant("completed answer"),
+			vscode.LanguageModelChatMessage.User("follow-up request"),
+		];
+		const match = matchCodexConversationTail(nextTurn, anchor);
+		assert.strictEqual(match.strategy, "suffix");
+		assert.strictEqual(match.matchedHistoryMessages, 1);
+		assert.strictEqual(match.tail?.length, 1);
+		assert.strictEqual(
+			(match.tail?.[0].content[0] as vscode.LanguageModelTextPart).value,
+			"follow-up request"
+		);
+	});
+
+	test("rejects suffix reuse when the latest semantic request changed", () => {
+		const original = [
+			vscode.LanguageModelChatMessage.User("service context"),
+			vscode.LanguageModelChatMessage.User("original request"),
+		];
+		const anchor = createCodexConversationAnchor(original, "same answer");
+		const edited = [
+			vscode.LanguageModelChatMessage.User("updated service context"),
+			vscode.LanguageModelChatMessage.User("edited original request"),
+			vscode.LanguageModelChatMessage.Assistant("same answer"),
+			vscode.LanguageModelChatMessage.User("follow-up"),
+		];
+		const match = matchCodexConversationTail(edited, anchor);
+		assert.strictEqual(match.tail, undefined);
+		assert.strictEqual(match.missReason, "history-suffix-changed");
 	});
 
 	test("does not reuse a conversation when the prior assistant answer differs", () => {
@@ -447,28 +510,58 @@ suite("Codex subscription provider", () => {
 		assert.deepStrictEqual(namespace.tools.map(tool => tool.name), ["llamacpp_search_memory", "specialized_private_tool"]);
 		assert.ok(namespace.tools.every(tool => tool.deferLoading === true));
 		assert.deepStrictEqual(dynamic.deferredNames, new Set(["llamacpp_search_memory", "specialized_private_tool"]));
+		assert.deepStrictEqual(dynamic.toolNamespaces, new Map([
+			["llamacpp_search_memory", CODEX_DEFERRED_TOOL_NAMESPACE],
+			["specialized_private_tool", CODEX_DEFERRED_TOOL_NAMESPACE],
+		]));
 		assert.deepStrictEqual(
 			dynamic.runtimeSignatures.filter(tool => tool.deferLoading).map(tool => tool.namespace),
 			[CODEX_DEFERRED_TOOL_NAMESPACE, CODEX_DEFERRED_TOOL_NAMESPACE]
 		);
 	});
 
-	test("routes a deferred dynamic tool only through its declared namespace", async () => {
+	test("namespaces VS Code tools that collide with built-in Codex tools", () => {
+		const tools: vscode.LanguageModelChatTool[] = [
+			{ name: "read_file", description: "Read a workspace file", inputSchema: { type: "object" } },
+			{ name: "apply_patch", description: "Apply a patch", inputSchema: { type: "object" } },
+			{ name: "view_image", description: "View an image", inputSchema: { type: "object" } },
+		];
+		const dynamic = buildCodexDynamicTools(tools, { deferNonCoreTools: true });
+		const nativeNamespace = dynamic.specs.find(
+			tool => tool.type === "namespace" && tool.name === CODEX_NATIVE_TOOL_NAMESPACE
+		);
+		assert.ok(nativeNamespace && nativeNamespace.type === "namespace");
+		assert.deepStrictEqual(nativeNamespace.tools.map(tool => tool.name), ["apply_patch", "view_image"]);
+		assert.ok(nativeNamespace.tools.every(tool => tool.deferLoading !== true));
+		assert.deepStrictEqual(dynamic.toolNamespaces, new Map([
+			["apply_patch", CODEX_NATIVE_TOOL_NAMESPACE],
+			["view_image", CODEX_NATIVE_TOOL_NAMESPACE],
+		]));
+		assert.deepStrictEqual(
+			dynamic.runtimeSignatures.filter(tool => tool.namespace === CODEX_NATIVE_TOOL_NAMESPACE).map(tool => tool.name),
+			["apply_patch", "view_image"]
+		);
+	});
+
+	test("routes namespaced dynamic tools only through their declared namespace", async () => {
 		const provider = new CodexChatModelProvider("test");
-		let delegatedTool = "";
+		const delegatedTools: string[] = [];
 		const internals = provider as unknown as {
 			dynamicToolContexts: Map<string, {
 				callableNames: ReadonlySet<string>;
-				deferredNames: ReadonlySet<string>;
+				toolNamespaces: ReadonlyMap<string, string>;
 				delegate: (call: { tool: string }) => Promise<{ contentItems: Array<{ type: "inputText"; text: string }>; success: boolean }>;
 			}>;
 			handleDynamicToolCall: (params: Record<string, unknown>) => Promise<{ success: boolean }> | { success: boolean };
 		};
 		internals.dynamicToolContexts.set("thread", {
-			callableNames: new Set(["create_directory"]),
-			deferredNames: new Set(["create_directory"]),
+			callableNames: new Set(["create_directory", "apply_patch"]),
+			toolNamespaces: new Map([
+				["create_directory", CODEX_DEFERRED_TOOL_NAMESPACE],
+				["apply_patch", CODEX_NATIVE_TOOL_NAMESPACE],
+			]),
 			delegate: async call => {
-				delegatedTool = call.tool;
+				delegatedTools.push(call.tool);
 				return { contentItems: [{ type: "inputText", text: "ok" }], success: true };
 			},
 		});
@@ -489,7 +582,15 @@ suite("Codex subscription provider", () => {
 			arguments: { path: "tmp" },
 		});
 		assert.strictEqual(accepted.success, true);
-		assert.strictEqual(delegatedTool, "create_directory");
+		const nativeAccepted = await internals.handleDynamicToolCall({
+			threadId: "thread",
+			callId: "native-namespace",
+			tool: "apply_patch",
+			namespace: CODEX_NATIVE_TOOL_NAMESPACE,
+			arguments: { patch: "test" },
+		});
+		assert.strictEqual(nativeAccepted.success, true);
+		assert.deepStrictEqual(delegatedTools, ["create_directory", "apply_patch"]);
 		provider.dispose();
 	});
 

@@ -2,6 +2,7 @@ import type * as vscode from "vscode";
 
 const MAX_TOOL_DESCRIPTION_CHARS = 1_024;
 export const CODEX_DEFERRED_TOOL_NAMESPACE = "vscode_deferred";
+export const CODEX_NATIVE_TOOL_NAMESPACE = "vscode_native";
 const EAGER_TOOL_SUFFIXES = [
 	"readfile",
 	"grepsearch",
@@ -28,6 +29,10 @@ const EAGER_TOOL_SUFFIXES = [
 const EXCLUDED_VSCODE_TOOLS = new Set([
 	"copilot_editFiles",
 	"copilot_switchAgent",
+]);
+const CODEX_BUILTIN_TOOL_COLLISIONS = new Set([
+	"apply_patch",
+	"view_image",
 ]);
 
 export interface CodexDynamicFunctionToolSpec {
@@ -58,6 +63,7 @@ export interface CodexDynamicToolSet {
 	specs: CodexDynamicToolSpec[];
 	callableNames: Set<string>;
 	deferredNames: Set<string>;
+	toolNamespaces: Map<string, string>;
 	runtimeSignatures: CodexDynamicToolRuntimeSignature[];
 	skippedNames: string[];
 }
@@ -96,9 +102,11 @@ export function buildCodexDynamicTools(
 	options: { deferNonCoreTools?: boolean } = {}
 ): CodexDynamicToolSet {
 	const eagerSpecs: CodexDynamicFunctionToolSpec[] = [];
+	const nativeSpecs: CodexDynamicFunctionToolSpec[] = [];
 	const deferredSpecs: CodexDynamicFunctionToolSpec[] = [];
 	const callableNames = new Set<string>();
 	const deferredNames = new Set<string>();
+	const toolNamespaces = new Map<string, string>();
 	const skippedNames: string[] = [];
 
 	for (const tool of advertisedTools) {
@@ -110,7 +118,8 @@ export function buildCodexDynamicTools(
 			skippedNames.push(tool.name);
 			continue;
 		}
-		const deferLoading = options.deferNonCoreTools === true && !isCoreAgentTool(tool.name);
+		const useNativeNamespace = CODEX_BUILTIN_TOOL_COLLISIONS.has(tool.name);
+		const deferLoading = !useNativeNamespace && options.deferNonCoreTools === true && !isCoreAgentTool(tool.name);
 		const spec: CodexDynamicFunctionToolSpec = {
 			type: "function",
 			name: tool.name,
@@ -118,9 +127,13 @@ export function buildCodexDynamicTools(
 			inputSchema: normalizeJsonSchema(tool.inputSchema),
 			...(deferLoading ? { deferLoading: true } : {}),
 		};
-		if (deferLoading) {
+		if (useNativeNamespace) {
+			nativeSpecs.push(spec);
+			toolNamespaces.set(tool.name, CODEX_NATIVE_TOOL_NAMESPACE);
+		} else if (deferLoading) {
 			deferredSpecs.push(spec);
 			deferredNames.add(tool.name);
+			toolNamespaces.set(tool.name, CODEX_DEFERRED_TOOL_NAMESPACE);
 		} else {
 			eagerSpecs.push(spec);
 		}
@@ -128,6 +141,14 @@ export function buildCodexDynamicTools(
 	}
 
 	const specs: CodexDynamicToolSpec[] = [...eagerSpecs];
+	if (nativeSpecs.length > 0) {
+		specs.push({
+			type: "namespace",
+			name: CODEX_NATIVE_TOOL_NAMESPACE,
+			description: "Native VS Code tools whose names overlap with built-in Codex tools.",
+			tools: nativeSpecs,
+		});
+	}
 	if (deferredSpecs.length > 0) {
 		specs.push({
 			type: "namespace",
@@ -143,6 +164,12 @@ export function buildCodexDynamicTools(
 			inputSchema: tool.inputSchema,
 			deferLoading: false,
 		})),
+		...nativeSpecs.map(tool => ({
+			namespace: CODEX_NATIVE_TOOL_NAMESPACE,
+			name: tool.name,
+			inputSchema: tool.inputSchema,
+			deferLoading: false,
+		})),
 		...deferredSpecs.map(tool => ({
 			namespace: CODEX_DEFERRED_TOOL_NAMESPACE,
 			name: tool.name,
@@ -151,5 +178,5 @@ export function buildCodexDynamicTools(
 		})),
 	].sort((left, right) => `${left.namespace ?? ""}\0${left.name}`.localeCompare(`${right.namespace ?? ""}\0${right.name}`));
 
-	return { specs, callableNames, deferredNames, runtimeSignatures, skippedNames };
+	return { specs, callableNames, deferredNames, toolNamespaces, runtimeSignatures, skippedNames };
 }

@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.4.9 - 2026-07-18
+
+- Restored completed-thread reuse when Copilot rewrites older service/context
+  messages between user turns: reuse now requires the exact prior answer and an
+  unchanged adjacent history suffix instead of an identical full history.
+- Added body-free Codex thread-reuse diagnostics with categorized model,
+  runtime, process, answer, and history mismatch reasons.
+- Kept an active Codex turn alive when VS Code changes its advertised tool
+  catalog between a native tool call and its result, preventing a redundant
+  full-history thread restart.
+- Moved the outer `apply_patch` and `view_image` tools into the non-deferred
+  `vscode_native` namespace so they no longer collide with Codex built-ins and
+  remain available through native Copilot tool cards.
+- Added regression coverage for catalog changes and namespaced built-in
+  collisions, plus a no-inference protocol smoke test with both namespaces.
+
 ## 1.4.8 - 2026-07-18
 
 - Fixed Codex thread startup by placing deferred dynamic tools inside the

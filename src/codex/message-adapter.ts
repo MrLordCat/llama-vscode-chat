@@ -36,7 +36,20 @@ export interface CodexToolContinuation {
 export interface CodexConversationAnchor {
 	messageCount: number;
 	messageDigest: string;
+	historySuffixDigests: string[];
 	assistantTextDigest: string;
+}
+
+export type CodexConversationTailMissReason =
+	| "no-follow-up"
+	| "assistant-answer-missing"
+	| "history-suffix-changed";
+
+export interface CodexConversationTailMatch {
+	tail?: readonly vscode.LanguageModelChatRequestMessage[];
+	strategy?: "exact" | "suffix";
+	matchedHistoryMessages: number;
+	missReason?: CodexConversationTailMissReason;
 }
 
 const DEFAULT_MAX_CODEX_INPUT_CHARS = 600_000;
@@ -46,6 +59,7 @@ const DEFAULT_MAX_TOOL_RESULT_CHARS = 12_000;
 const MIN_MAX_TOOL_RESULT_CHARS = 1_024;
 const MAX_MAX_TOOL_RESULT_CHARS = 100_000;
 const MAX_PRESERVED_FIRST_MESSAGE_CHARS = 32_000;
+const CODEX_ANCHOR_SUFFIX_MESSAGES = 8;
 const COMPACTION_MARKER = "[Earlier VS Code conversation messages were omitted by the provider to fit the Codex input budget.]";
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -90,6 +104,20 @@ function updatePartDigest(hash: ReturnType<typeof createHash>, part: unknown): v
 	hash.update("other\0").update(collectUnknownText(part)).update("\0");
 }
 
+function hashCodexMessage(message: vscode.LanguageModelChatRequestMessage): string {
+	const hash = createHash("sha256");
+	hash.update(message.role === vscode.LanguageModelChatMessageRole.Assistant ? "assistant\0" : "user\0");
+	hash.update(message.name ?? "").update("\0");
+	for (const part of message.content) {
+		updatePartDigest(hash, part);
+	}
+	return hash.digest("hex");
+}
+
+function hashAssistantText(value: string): string {
+	return createHash("sha256").update(value).digest("hex");
+}
+
 export function hashCodexMessages(
 	messages: readonly vscode.LanguageModelChatRequestMessage[],
 	messageCount = messages.length
@@ -97,12 +125,7 @@ export function hashCodexMessages(
 	const hash = createHash("sha256");
 	const count = Math.max(0, Math.min(messages.length, messageCount));
 	for (let index = 0; index < count; index++) {
-		const message = messages[index];
-		hash.update(message.role === vscode.LanguageModelChatMessageRole.Assistant ? "assistant\0" : "user\0");
-		hash.update(message.name ?? "").update("\0");
-		for (const part of message.content) {
-			updatePartDigest(hash, part);
-		}
+		hash.update(hashCodexMessage(messages[index])).update("\0");
 	}
 	return hash.digest("hex");
 }
@@ -124,7 +147,87 @@ export function createCodexConversationAnchor(
 	return {
 		messageCount: messages.length,
 		messageDigest: hashCodexMessages(messages),
-		assistantTextDigest: createHash("sha256").update(assistantText).digest("hex"),
+		historySuffixDigests: messages
+			.slice(-CODEX_ANCHOR_SUFFIX_MESSAGES)
+			.map(message => hashCodexMessage(message)),
+		assistantTextDigest: hashAssistantText(assistantText),
+	};
+}
+
+function isUserFollowUp(messages: readonly vscode.LanguageModelChatRequestMessage[]): boolean {
+	return messages.some(message => message.role === vscode.LanguageModelChatMessageRole.User);
+}
+
+function countMatchingHistorySuffix(
+	messages: readonly vscode.LanguageModelChatRequestMessage[],
+	assistantIndex: number,
+	anchor: CodexConversationAnchor
+): number {
+	const expected = anchor.historySuffixDigests;
+	let matched = 0;
+	while (matched < expected.length && assistantIndex - matched - 1 >= 0) {
+		const expectedDigest = expected[expected.length - matched - 1];
+		const actualDigest = hashCodexMessage(messages[assistantIndex - matched - 1]);
+		if (actualDigest !== expectedDigest) {
+			break;
+		}
+		matched++;
+	}
+	return matched;
+}
+
+/**
+ * Matches a completed provider response to the next Copilot request.
+ *
+ * The exact path is cheapest. The suffix path tolerates Copilot rewriting old
+ * service/context messages while still requiring the exact prior answer and at
+ * least one unchanged immediately preceding conversation message.
+ */
+export function matchCodexConversationTail(
+	messages: readonly vscode.LanguageModelChatRequestMessage[],
+	anchor: CodexConversationAnchor
+): CodexConversationTailMatch {
+	if (messages.length > anchor.messageCount + 1 && hashCodexMessages(messages, anchor.messageCount) === anchor.messageDigest) {
+		const priorAssistant = messages[anchor.messageCount];
+		const assistantText = getCodexVisibleAssistantText(priorAssistant);
+		const tail = messages.slice(anchor.messageCount + 1);
+		if (assistantText && hashAssistantText(assistantText) === anchor.assistantTextDigest && isUserFollowUp(tail)) {
+			return {
+				tail,
+				strategy: "exact",
+				matchedHistoryMessages: anchor.messageCount,
+			};
+		}
+	}
+
+	let foundAssistant = false;
+	for (let assistantIndex = messages.length - 2; assistantIndex >= 0; assistantIndex--) {
+		const assistantText = getCodexVisibleAssistantText(messages[assistantIndex]);
+		if (!assistantText || hashAssistantText(assistantText) !== anchor.assistantTextDigest) {
+			continue;
+		}
+		foundAssistant = true;
+		const tail = messages.slice(assistantIndex + 1);
+		if (!isUserFollowUp(tail)) {
+			continue;
+		}
+		const matchedHistoryMessages = countMatchingHistorySuffix(messages, assistantIndex, anchor);
+		if (matchedHistoryMessages > 0) {
+			return {
+				tail,
+				strategy: "suffix",
+				matchedHistoryMessages,
+			};
+		}
+	}
+
+	return {
+		matchedHistoryMessages: 0,
+		missReason: foundAssistant
+			? "history-suffix-changed"
+			: messages.length <= anchor.messageCount + 1
+				? "no-follow-up"
+				: "assistant-answer-missing",
 	};
 }
 
@@ -132,19 +235,7 @@ export function findCodexConversationTail(
 	messages: readonly vscode.LanguageModelChatRequestMessage[],
 	anchor: CodexConversationAnchor
 ): readonly vscode.LanguageModelChatRequestMessage[] | undefined {
-	if (messages.length <= anchor.messageCount + 1) {
-		return undefined;
-	}
-	if (hashCodexMessages(messages, anchor.messageCount) !== anchor.messageDigest) {
-		return undefined;
-	}
-	const priorAssistant = messages[anchor.messageCount];
-	const assistantText = getCodexVisibleAssistantText(priorAssistant);
-	if (!assistantText || createHash("sha256").update(assistantText).digest("hex") !== anchor.assistantTextDigest) {
-		return undefined;
-	}
-	const tail = messages.slice(anchor.messageCount + 1);
-	return tail.some(message => message.role === vscode.LanguageModelChatMessageRole.User) ? tail : undefined;
+	return matchCodexConversationTail(messages, anchor).tail;
 }
 
 function collectToolResultContent(

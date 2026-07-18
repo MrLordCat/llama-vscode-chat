@@ -197,6 +197,28 @@ shows the current reuse ratio and last reported prompt-cache hit. See
 [Codex Subscription](docs/CODEX_SUBSCRIPTION.md) for the architecture, security
 model, settings, and troubleshooting.
 
+### Codex Cache and Thread Reuse
+
+The first Codex request after an extension-host or app-server restart is a cold
+start and sends the bounded conversation history. Native tool-result rounds
+then continue the same app-server turn and send only the matching tool-result
+tail. A normal follow-up user message reuses the completed thread when the
+model, workspace, sandbox, approval policy, tool catalog, and process generation
+still match.
+
+Follow-up matching first requires an exact SHA-256 conversation lineage. Copilot
+can rewrite older service/context messages between requests, so the provider has
+a safe fallback that still requires the exact previous visible answer and an
+unchanged adjacent history suffix. Editing the recent semantic history or
+regenerating the previous answer deliberately starts a fresh thread.
+
+Use `Local LLM: Show Codex Subscription Status` to see the in-process reuse ratio
+and latest prompt-cache percentage. With file logging enabled, successful warm
+follow-ups emit `codex.chat.thread_reused` with `inputMode: "user-turn"`; misses
+emit body-free `codex.chat.thread_reuse_miss` reason counts. After installing a
+new VSIX and reloading VS Code, the first request is expected to be cold. Send a
+second ordinary follow-up without another reload to validate cross-turn reuse.
+
 ## Model Sources
 
 The extension can advertise models from several OpenAI-compatible endpoints and

@@ -5,15 +5,14 @@ import type { LlamaLogSink } from "../logger";
 import { CodexAppServerClient, CodexAppServerError, type CodexServerRequest } from "./app-server-client";
 import {
 	buildCodexDynamicTools,
-	CODEX_DEFERRED_TOOL_NAMESPACE,
 	type CodexDynamicToolCallResponse,
 } from "./dynamic-tools";
 import {
 	estimateCodexInputTokens,
 	createCodexConversationAnchor,
 	convertCodexToolResult,
-	findCodexConversationTail,
 	findCodexToolContinuations,
+	matchCodexConversationTail,
 	serializeCodexConversation,
 	type CodexConversationAnchor,
 } from "./message-adapter";
@@ -65,7 +64,7 @@ export interface CodexProviderStatus {
 
 interface ActiveDynamicToolContext {
 	callableNames: ReadonlySet<string>;
-	deferredNames: ReadonlySet<string>;
+	toolNamespaces: ReadonlyMap<string, string>;
 	delegate: (call: CodexDelegatedToolCall) => Promise<CodexDynamicToolCallResponse>;
 }
 
@@ -86,6 +85,15 @@ interface CodexConversationThread {
 	anchor: CodexConversationAnchor;
 	lastUsedAt: number;
 	processGeneration: number;
+}
+
+export function canResumeCodexToolTurn(
+	stored: { modelId: string; runtimeKey: string; processGeneration: number } | undefined,
+	current: { modelId: string; runtimeKey: string; processGeneration: number }
+): boolean {
+	// A server-issued call id owns the active turn. Catalog/settings changes apply after it completes.
+	return stored?.modelId === current.modelId
+		&& stored.processGeneration === current.processGeneration;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -360,11 +368,20 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		const storedActiveTurn = continuationMatch
 			? this.activeToolTurns.get(continuationMatch.callId)
 			: undefined;
-		const activeTurn = storedActiveTurn?.modelId === model.id
-			&& storedActiveTurn.runtimeKey === runtimeKey
-			&& storedActiveTurn.processGeneration === this.client.generation
+		const activeTurn = canResumeCodexToolTurn(storedActiveTurn, {
+			modelId: model.id,
+			runtimeKey,
+			processGeneration: this.client.generation,
+		})
 			? storedActiveTurn
 			: undefined;
+		if (activeTurn && activeTurn.runtimeKey !== runtimeKey) {
+			this.logSink?.log("codex.chat.runtime_change_deferred", {
+				threadId: activeTurn.bridge.threadId,
+				turnId: activeTurn.bridge.turnId,
+				callId: continuationMatch?.callId,
+			});
+		}
 		if (continuationMatch) {
 			for (const call of activeTurn?.bridge.pendingCalls ?? [continuationMatch]) {
 				this.activeToolTurns.delete(call.callId);
@@ -375,22 +392,44 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		}
 		let conversationContinuation: CodexConversationThread | undefined;
 		let conversationTail: readonly vscode.LanguageModelChatRequestMessage[] | undefined;
+		let conversationMatchStrategy: "exact" | "suffix" | undefined;
+		let matchedHistoryMessages = 0;
+		const reuseMissReasons = new Map<string, number>();
+		const countReuseMiss = (reason: string): void => {
+			reuseMissReasons.set(reason, (reuseMissReasons.get(reason) ?? 0) + 1);
+		};
 		if (!activeTurn) {
 			for (const candidate of [...this.conversationThreads.values()].sort((left, right) => right.lastUsedAt - left.lastUsedAt)) {
-				if (
-					candidate.modelId !== model.id
-					|| candidate.runtimeKey !== runtimeKey
-					|| candidate.processGeneration !== this.client.generation
-				) {
+				if (candidate.modelId !== model.id) {
+					countReuseMiss("model-changed");
 					continue;
 				}
-				const tail = findCodexConversationTail(messages, candidate.anchor);
-				if (tail) {
+				if (candidate.runtimeKey !== runtimeKey) {
+					countReuseMiss("runtime-changed");
+					continue;
+				}
+				if (candidate.processGeneration !== this.client.generation) {
+					countReuseMiss("process-restarted");
+					continue;
+				}
+				const match = matchCodexConversationTail(messages, candidate.anchor);
+				if (match.tail) {
 					conversationContinuation = candidate;
-					conversationTail = tail;
+					conversationTail = match.tail;
+					conversationMatchStrategy = match.strategy;
+					matchedHistoryMessages = match.matchedHistoryMessages;
 					this.conversationThreads.delete(candidate.threadId);
 					break;
 				}
+				countReuseMiss(match.missReason ?? "conversation-changed");
+			}
+			if (!conversationContinuation) {
+				this.logSink?.log("codex.chat.thread_reuse_miss", {
+					storedThreadCount: this.conversationThreads.size,
+					messageCount: messages.length,
+					reasons: Object.fromEntries([...reuseMissReasons].sort(([left], [right]) => left.localeCompare(right))),
+					noStoredThreads: this.conversationThreads.size === 0,
+				});
 			}
 		}
 		const inputMessages = activeTurn
@@ -407,8 +446,10 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			maxToolResultChars: config.get("codexMaxToolResultChars", 12_000),
 		});
 		const reusedThread = activeTurn ?? conversationContinuation;
+		const threadRuntimeKey = reusedThread?.runtimeKey ?? runtimeKey;
+		const threadCallableNames = reusedThread?.callableNames ?? dynamicToolSet.callableNames;
 		const callableNames = reusedThread
-			? new Set([...reusedThread.callableNames].filter(name => dynamicToolSet.callableNames.has(name)))
+			? new Set([...threadCallableNames].filter(name => dynamicToolSet.callableNames.has(name)))
 			: dynamicToolSet.callableNames;
 
 		this.logSink?.log("codex.chat.start", {
@@ -455,6 +496,8 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 				threadId,
 				inputMode,
 				inputChars: input.text.length,
+				strategy: conversationMatchStrategy,
+				matchedHistoryMessages,
 			});
 			bridge = this.createTurnBridge(threadId);
 		} else {
@@ -474,7 +517,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		if (!activeTurn && callableNames.size > 0) {
 			this.dynamicToolContexts.set(threadId, {
 				callableNames,
-				deferredNames: new Set([...dynamicToolSet.deferredNames].filter(name => callableNames.has(name))),
+				toolNamespaces: new Map([...dynamicToolSet.toolNamespaces].filter(([name]) => callableNames.has(name))),
 				delegate: call => bridge.delegate(call),
 			});
 		}
@@ -504,8 +547,8 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 				const active: ActiveCodexToolTurn = {
 					bridge,
 					modelId: model.id,
-					runtimeKey,
-					callableNames,
+					runtimeKey: threadRuntimeKey,
+					callableNames: threadCallableNames,
 					createdAt: Date.now(),
 					processGeneration: this.client.generation,
 				};
@@ -562,8 +605,8 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 				this.rememberConversationThread({
 					threadId,
 					modelId: model.id,
-					runtimeKey,
-					callableNames,
+					runtimeKey: threadRuntimeKey,
+					callableNames: threadCallableNames,
 					anchor: createCodexConversationAnchor(messages, finalText),
 					lastUsedAt: Date.now(),
 					processGeneration: this.client.generation,
@@ -810,7 +853,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		const namespace = params.namespace;
 		const context = this.dynamicToolContexts.get(threadId);
 		const actualNamespace = typeof namespace === "string" ? namespace : null;
-		const expectedNamespace = context?.deferredNames.has(tool) ? CODEX_DEFERRED_TOOL_NAMESPACE : null;
+		const expectedNamespace = context?.toolNamespaces.get(tool) ?? null;
 		if (
 			!context
 			|| !callId

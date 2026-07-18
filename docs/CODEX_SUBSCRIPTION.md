@@ -54,7 +54,9 @@ requests are emitted together and resume only after every matching result is
 available. The original Codex turn continues directly: there is no interrupt,
 second `turn/start`, serialized continuation prompt, or full-history prefill.
 Continuations are matched by unique native tool call ids, time out after 30
-minutes if abandoned, and are never persisted as chat history.
+minutes if abandoned, and are never persisted as chat history. If VS Code adds
+or removes advertised tools while a call is running, the active turn keeps its
+original catalog until completion instead of restarting with the full history.
 
 Copilot can advertise a very large catalog (95 tools in the measured baseline).
 By default, the provider marks uncommon schemas with app-server
@@ -63,15 +65,22 @@ reads, searches, terminal commands, edits, web verification, user input, and
 planning immediately visible. Codex's built-in tool search loads a deferred
 schema only when it is needed. Disable
 `llamacpp.codexDeferNonCoreTools` if an older custom CLI does not support this
-experimental app-server field.
+experimental app-server field. Outer tools named `apply_patch` and `view_image`
+use the eager `vscode_native` namespace to avoid colliding with the Codex
+built-ins while preserving native Copilot execution and tool cards.
 
 Completed conversation threads stay available in memory for up to four hours
-(maximum 16). Reuse requires matching SHA-256 history and answer digests, model,
-workspace, sandbox, approval policy, dynamic tool catalog, and app-server
-process generation. Editing or regenerating an earlier turn, changing runtime
-configuration, restarting Codex, or missing the cache starts a fresh thread with
-the bounded full Copilot history. Quick Access reports both the in-process
-thread-reuse ratio and the last prompt-cache percentage returned by Codex.
+(maximum 16). Reuse first checks the complete SHA-256 history and answer
+digests. If Copilot rewrote older service/context messages, a safe fallback
+requires the exact prior answer plus an unchanged adjacent history suffix.
+Model, workspace, sandbox, approval policy, dynamic tool catalog, and app-server
+process generation must still match. Editing the recent semantic history,
+regenerating an answer, changing runtime configuration, restarting Codex, or
+missing the cache starts a fresh thread with the bounded full Copilot history.
+Quick Access reports both the in-process thread-reuse ratio and the last
+prompt-cache percentage returned by Codex. Body-free
+codex.chat.thread_reuse_miss events categorize reuse failures without logging
+conversation text or hashes.
 
 This design also supports private caller tools that are not present in
 `vscode.lm.tools`, including Copilot's terminal implementation. Native calls use
