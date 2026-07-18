@@ -1,10 +1,45 @@
 # Changelog
 
+## 1.4.12 - 2026-07-18
+
+- Added an explicit cross-extension conversation contract: Copilot patch v7
+  forwards its stable conversation id through `modelOptions`, allowing the
+  provider to identify a completed thread even when Copilot rewrites rendered
+  service and tool history between user turns.
+- Kept reuse fail-closed by requiring the exact prior visible assistant answer,
+  an advancing Copilot turn index, matching runtime settings, and a safe
+  intersection of the original and current tool catalogs.
+- Added privacy-preserving diagnostics for conversation-id availability and
+  matching, plus regressions for unstable rendered history and regenerated
+  answers.
+
+## 1.4.11 - 2026-07-18
+
+- Removed the mutable VS Code tool catalog from the completed-thread runtime
+  fingerprint after a measured `90 -> 93` tool change forced another 600K
+  character full-history request.
+- Preserved the original app-server thread catalog and namespace routes while
+  exposing only the safe intersection with tools advertised by the current
+  Copilot request. Newly added, removed, re-namespaced, or schema-changed tools
+  cannot be delegated through the reused thread.
+- Added separate catalog fingerprints and reuse telemetry for original,
+  current, and callable tool counts.
+
+## 1.4.10 - 2026-07-18
+
+- Fixed the measured `history-suffix-changed` follow-up miss by canonicalizing
+  recent semantic user history separately from Copilot's mutable tool-call and
+  tool-result plumbing.
+- Kept the exact prior visible-answer check and now requires the complete
+  bounded suffix of recent user messages to match, so edited requests still
+  force a safe cold thread.
+- Renamed reuse diagnostics to report matched semantic user messages and the
+  precise `user-history-suffix-changed` miss reason.
+
 ## 1.4.9 - 2026-07-18
 
-- Restored completed-thread reuse when Copilot rewrites older service/context
-  messages between user turns: reuse now requires the exact prior answer and an
-  unchanged adjacent history suffix instead of an identical full history.
+- Added an initial completed-thread fallback for histories that are not
+  byte-identical between user turns while retaining exact answer validation.
 - Added body-free Codex thread-reuse diagnostics with categorized model,
   runtime, process, answer, and history mismatch reasons.
 - Kept an active Codex turn alive when VS Code changes its advertised tool

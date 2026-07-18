@@ -57,7 +57,7 @@ available; the configured fallback is used otherwise.
 ## Optional Bundle Patch
 
 `scripts/patch-copilot-chat.mjs` modifies Copilot Chat only for the `llamacpp`
-vendor. Patch v6 makes the following changes:
+vendor. Patch v7 makes the following changes:
 
 - `maxOutputTokens` uses the limit advertised by the selected model instead of
   the wrapper's fixed 8192-token value;
@@ -74,6 +74,9 @@ vendor. Patch v6 makes the following changes:
   the provider can sanitize and budget them;
 - automatic background and foreground LLM summarization is disabled for this
   provider. The explicit Compact Conversation command remains available.
+- Copilot's stable conversation id is forwarded through provider-private
+  `modelOptions` so completed Codex threads can be reused even when Copilot
+  rewrites generated history. The id is never written to extension logs.
 
 The extension maps native values to its request modes:
 
@@ -121,7 +124,7 @@ Before writing, the patcher:
 6. creates `extension.js.llama-vscode-chat.backup` beside the bundle;
 7. records Copilot version and original/patched SHA-256 hashes in a JSON file.
 
-Applying patch v6 over patch v2 through v5 uses the preserved original backup
+Applying patch v7 over patch v2 through v6 uses the preserved original backup
 rather than stacking edits on the already modified bundle.
 
 The patch is deliberately fail-closed. If a Copilot update changes the bundle
@@ -167,6 +170,8 @@ Do not copy a patched bundle from an older VS Code build.
 ## Ownership Boundary
 
 The VSIX owns model discovery, routing, prompts, tools, memory, streaming,
-context usage, and diagnostics. The external patch owns only the missing native
-Copilot controls. Keeping this boundary narrow makes the extension usable
-without modifying VS Code and makes restoration deterministic.
+context usage, thread validation, and diagnostics. The external patch owns the
+missing native Copilot controls and passes the stable conversation identity
+that the public request surface does not otherwise expose. Keeping this
+boundary narrow makes restoration deterministic; without the patch, the
+provider falls back to conservative rendered-history matching.

@@ -3,9 +3,10 @@ import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-const PATCH_ID = "llama-vscode-chat:copilot-native-model-controls:v6";
+const PATCH_ID = "llama-vscode-chat:copilot-native-model-controls:v7";
 const PATCH_MARKER = `/* ${PATCH_ID} */`;
 const LEGACY_PATCH_MARKERS = [
+	"/* llama-vscode-chat:copilot-native-model-controls:v6 */",
 	"/* llama-vscode-chat:copilot-native-model-controls:v5 */",
 	"/* llama-vscode-chat:copilot-native-model-controls:v4 */",
 	"/* llama-vscode-chat:copilot-native-model-controls:v3 */",
@@ -192,15 +193,23 @@ function patchExtensionEndpointClass(source) {
 	if (/\bmodelCapabilities:/.test(signatureMatch[1] + signatureMatch[2])) {
 		throw new Error("Copilot request signature already contains modelCapabilities without this patch marker.");
 	}
+	const telemetryVariable = (signatureMatch[1] + signatureMatch[2])
+		.match(/\btelemetryProperties:([A-Za-z_$][\w$]*)/)?.[1];
+	if (!telemetryVariable) {
+		throw new Error("Copilot request telemetry variable was not found.");
+	}
 	classSource = classSource.replace(
 		methodSignature,
-		`async makeChatRequest2({${signatureMatch[1]}${signatureMatch[2]},modelCapabilities:__llamaModelCapabilities},${signatureMatch[3]}){`
+		`async makeChatRequest2({${signatureMatch[1]}${signatureMatch[2]},modelCapabilities:__llamaModelCapabilities},${signatureMatch[3]}){` +
+		`let __llamaConversationId=__llamaConversationMetadata(${telemetryVariable});`
 	);
 
 	const modelOptionsAnchor = "modelOptions:{";
 	const modelOptionsReplacement =
 		"modelOptions:{...(__llamaModelCapabilities?.reasoningEffort?" +
-		"{reasoningEffort:__llamaModelCapabilities.reasoningEffort}:{}),";
+		"{reasoningEffort:__llamaModelCapabilities.reasoningEffort}:{})," +
+		'...((this.languageModel.vendor==="llamacpp"&&__llamaConversationId)?' +
+		"{_copilotConversationId:__llamaConversationId}:{}),";
 	classSource = replaceOnce(
 		classSource,
 		modelOptionsAnchor,
@@ -223,6 +232,13 @@ function patchExtensionEndpointClass(source) {
 	);
 
 	let patched = source.slice(0, classStart) + classSource + source.slice(classEnd + 1);
+	patched = replaceOnce(
+		patched,
+		'function IGa(n){if(typeof n?.turnIndex!="string"||!/^\\d+$/.test(n.turnIndex))return;let e=Number.parseInt(n.turnIndex,10);return Number.isSafeInteger(e)?e:void 0}function Amn',
+		'function IGa(n){if(typeof n?.turnIndex!="string"||!/^\\d+$/.test(n.turnIndex))return;let e=Number.parseInt(n.turnIndex,10);return Number.isSafeInteger(e)?e:void 0}' +
+		'function __llamaConversationMetadata(n){let e=n?.conversationId;return typeof e==="string"&&e.length>0&&e.length<=256?e:void 0}function Amn',
+		"extension endpoint Copilot conversation identity"
+	);
 	patched = replacePatternOnce(
 		patched,
 		/([A-Za-z_$][\w$]*)=t\.tools\?\.availableTools,([A-Za-z_$][\w$]*)=!!this\.endpoint\.supportsToolSearch,([A-Za-z_$][\w$]*)=\1\?\.length\?await this\.endpoint\.acquireTokenizer\(\)\.countToolTokens\(\1\):0/,

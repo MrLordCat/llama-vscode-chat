@@ -6,6 +6,7 @@ import { CodexAppServerClient, CodexAppServerError, type CodexServerRequest } fr
 import {
 	buildCodexDynamicTools,
 	type CodexDynamicToolCallResponse,
+	type CodexDynamicToolRuntimeSignature,
 } from "./dynamic-tools";
 import {
 	estimateCodexInputTokens,
@@ -72,7 +73,10 @@ interface ActiveCodexToolTurn {
 	bridge: CodexTurnBridge;
 	modelId: string;
 	runtimeKey: string;
+	toolCatalogKey: string;
 	callableNames: ReadonlySet<string>;
+	toolNamespaces: ReadonlyMap<string, string>;
+	toolSignatures: ReadonlyMap<string, string>;
 	createdAt: number;
 	processGeneration: number;
 }
@@ -81,10 +85,67 @@ interface CodexConversationThread {
 	threadId: string;
 	modelId: string;
 	runtimeKey: string;
+	toolCatalogKey: string;
 	callableNames: ReadonlySet<string>;
+	toolNamespaces: ReadonlyMap<string, string>;
+	toolSignatures: ReadonlyMap<string, string>;
+	copilotConversationId?: string;
+	copilotTurnIndex?: number;
 	anchor: CodexConversationAnchor;
 	lastUsedAt: number;
 	processGeneration: number;
+}
+
+export function createCodexRuntimeFingerprints(value: {
+	modelId: string;
+	cwd: string;
+	approvalPolicy: string;
+	sandbox: string;
+	dynamicTools: unknown;
+}): { runtimeKey: string; toolCatalogKey: string } {
+	return {
+		runtimeKey: createCodexFingerprint({
+			modelId: value.modelId,
+			cwd: value.cwd,
+			approvalPolicy: value.approvalPolicy,
+			sandbox: value.sandbox,
+		}),
+		toolCatalogKey: createCodexFingerprint(value.dynamicTools),
+	};
+}
+
+function createCodexFingerprint(value: unknown): string {
+	return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function createCodexToolSignatures(
+	runtimeSignatures: readonly CodexDynamicToolRuntimeSignature[]
+): Map<string, string> {
+	return new Map(runtimeSignatures.map(signature => [
+		signature.name,
+		createCodexFingerprint(signature),
+	]));
+}
+
+export function intersectCodexThreadTools(
+	threadCallableNames: ReadonlySet<string>,
+	threadToolNamespaces: ReadonlyMap<string, string>,
+	threadToolSignatures: ReadonlyMap<string, string>,
+	currentCallableNames: ReadonlySet<string>,
+	currentToolSignatures: ReadonlyMap<string, string>
+): { callableNames: Set<string>; toolNamespaces: Map<string, string> } {
+	const callableNames = new Set(
+		[...threadCallableNames].filter(name =>
+			currentCallableNames.has(name)
+			&& threadToolSignatures.get(name) === currentToolSignatures.get(name)
+		)
+	);
+	return {
+		callableNames,
+		toolNamespaces: new Map(
+			[...threadToolNamespaces].filter(([name]) => callableNames.has(name))
+		),
+	};
 }
 
 export function canResumeCodexToolTurn(
@@ -110,6 +171,19 @@ function normalizeSandboxMode(value: unknown): "read-only" | "workspace-write" |
 
 function normalizeApprovalPolicy(value: unknown): "untrusted" | "on-request" | "never" {
 	return value === "untrusted" || value === "never" ? value : "on-request";
+}
+
+function normalizeCopilotConversationId(value: unknown): string | undefined {
+	if (typeof value !== "string") {
+		return undefined;
+	}
+	const normalized = value.trim();
+	return normalized.length > 0 && normalized.length <= 256 ? normalized : undefined;
+}
+
+function normalizeCopilotTurnIndex(value: unknown): number | undefined {
+	const numeric = typeof value === "number" ? value : Number.NaN;
+	return Number.isSafeInteger(numeric) && numeric >= 0 ? numeric : undefined;
 }
 
 export class CodexChatModelProvider implements vscode.LanguageModelChatProvider, vscode.Disposable {
@@ -346,6 +420,12 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			model
 		);
 		const summary = String(config.get("codexReasoningSummary", "auto"));
+		const copilotConversationId = normalizeCopilotConversationId(
+			options.modelOptions?._copilotConversationId
+		);
+		const copilotTurnIndex = normalizeCopilotTurnIndex(
+			options.modelOptions?._copilotTurnIndex ?? options.modelOptions?._telemetryTurn
+		);
 		const fastTier = config.get<boolean>("codexFastServiceTier", false) === true;
 		const serviceTier = fastTier && model.serviceTiers?.some(tier => tier.id === "priority")
 			? "priority"
@@ -354,9 +434,10 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		const dynamicToolSet = buildCodexDynamicTools(useVsCodeTools ? options.tools ?? [] : [], {
 			deferNonCoreTools: config.get<boolean>("codexDeferNonCoreTools", true) !== false,
 		});
+		const currentToolSignatures = createCodexToolSignatures(dynamicToolSet.runtimeSignatures);
 		this.pruneActiveToolTurns();
 		this.pruneConversationThreads();
-		const runtimeKey = this.createRuntimeKey({
+		const { runtimeKey, toolCatalogKey } = createCodexRuntimeFingerprints({
 			modelId: model.id,
 			cwd,
 			approvalPolicy,
@@ -382,6 +463,13 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 				callId: continuationMatch?.callId,
 			});
 		}
+		if (activeTurn && activeTurn.toolCatalogKey !== toolCatalogKey) {
+			this.logSink?.log("codex.chat.tool_catalog_change_deferred", {
+				threadId: activeTurn.bridge.threadId,
+				turnId: activeTurn.bridge.turnId,
+				callId: continuationMatch?.callId,
+			});
+		}
 		if (continuationMatch) {
 			for (const call of activeTurn?.bridge.pendingCalls ?? [continuationMatch]) {
 				this.activeToolTurns.delete(call.callId);
@@ -392,8 +480,9 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		}
 		let conversationContinuation: CodexConversationThread | undefined;
 		let conversationTail: readonly vscode.LanguageModelChatRequestMessage[] | undefined;
-		let conversationMatchStrategy: "exact" | "suffix" | undefined;
-		let matchedHistoryMessages = 0;
+		let conversationMatchStrategy: "exact" | "conversation-id" | "suffix" | undefined;
+		let copilotConversationMatched = false;
+		let matchedUserMessages = 0;
 		const reuseMissReasons = new Map<string, number>();
 		const countReuseMiss = (reason: string): void => {
 			reuseMissReasons.set(reason, (reuseMissReasons.get(reason) ?? 0) + 1);
@@ -412,12 +501,36 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 					countReuseMiss("process-restarted");
 					continue;
 				}
-				const match = matchCodexConversationTail(messages, candidate.anchor);
+				if (
+					copilotConversationId
+					&& candidate.copilotConversationId
+					&& candidate.copilotConversationId !== copilotConversationId
+				) {
+					countReuseMiss("conversation-changed");
+					continue;
+				}
+				const sameCopilotConversation = Boolean(
+					copilotConversationId
+					&& candidate.copilotConversationId === copilotConversationId
+				);
+				if (
+					sameCopilotConversation
+					&& copilotTurnIndex !== undefined
+					&& candidate.copilotTurnIndex !== undefined
+					&& copilotTurnIndex <= candidate.copilotTurnIndex
+				) {
+					countReuseMiss("conversation-turn-not-advanced");
+					continue;
+				}
+				const match = matchCodexConversationTail(messages, candidate.anchor, {
+					trustedConversation: sameCopilotConversation,
+				});
 				if (match.tail) {
 					conversationContinuation = candidate;
 					conversationTail = match.tail;
 					conversationMatchStrategy = match.strategy;
-					matchedHistoryMessages = match.matchedHistoryMessages;
+					copilotConversationMatched = sameCopilotConversation;
+					matchedUserMessages = match.matchedUserMessages;
 					this.conversationThreads.delete(candidate.threadId);
 					break;
 				}
@@ -447,10 +560,18 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		});
 		const reusedThread = activeTurn ?? conversationContinuation;
 		const threadRuntimeKey = reusedThread?.runtimeKey ?? runtimeKey;
+		const threadToolCatalogKey = reusedThread?.toolCatalogKey ?? toolCatalogKey;
 		const threadCallableNames = reusedThread?.callableNames ?? dynamicToolSet.callableNames;
-		const callableNames = reusedThread
-			? new Set([...threadCallableNames].filter(name => dynamicToolSet.callableNames.has(name)))
-			: dynamicToolSet.callableNames;
+		const threadToolNamespaces = reusedThread?.toolNamespaces ?? dynamicToolSet.toolNamespaces;
+		const threadToolSignatures = reusedThread?.toolSignatures ?? currentToolSignatures;
+		const effectiveTools = intersectCodexThreadTools(
+			threadCallableNames,
+			threadToolNamespaces,
+			threadToolSignatures,
+			dynamicToolSet.callableNames,
+			currentToolSignatures
+		);
+		const toolCatalogChanged = Boolean(reusedThread && threadToolCatalogKey !== toolCatalogKey);
 
 		this.logSink?.log("codex.chat.start", {
 			model: model.id,
@@ -468,6 +589,8 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			deferredVsCodeToolCount: dynamicToolSet.deferredNames.size,
 			skippedVsCodeToolCount: dynamicToolSet.skippedNames.length,
 			modelOptionKeys: Object.keys(options.modelOptions ?? {}).sort(),
+			copilotConversationIdPresent: copilotConversationId !== undefined,
+			copilotTurnIndex,
 			effort,
 			summary,
 			sandbox,
@@ -497,7 +620,12 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 				inputMode,
 				inputChars: input.text.length,
 				strategy: conversationMatchStrategy,
-				matchedHistoryMessages,
+				copilotConversationMatched,
+				matchedUserMessages,
+				toolCatalogChanged,
+				threadToolCount: threadCallableNames.size,
+				currentToolCount: dynamicToolSet.callableNames.size,
+				callableToolCount: effectiveTools.callableNames.size,
 			});
 			bridge = this.createTurnBridge(threadId);
 		} else {
@@ -514,10 +642,10 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			threadId = thread.thread.id;
 			bridge = this.createTurnBridge(threadId);
 		}
-		if (!activeTurn && callableNames.size > 0) {
+		if (!activeTurn && effectiveTools.callableNames.size > 0) {
 			this.dynamicToolContexts.set(threadId, {
-				callableNames,
-				toolNamespaces: new Map([...dynamicToolSet.toolNamespaces].filter(([name]) => callableNames.has(name))),
+				callableNames: effectiveTools.callableNames,
+				toolNamespaces: effectiveTools.toolNamespaces,
 				delegate: call => bridge.delegate(call),
 			});
 		}
@@ -548,7 +676,10 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 					bridge,
 					modelId: model.id,
 					runtimeKey: threadRuntimeKey,
+					toolCatalogKey: threadToolCatalogKey,
 					callableNames: threadCallableNames,
+					toolNamespaces: threadToolNamespaces,
+					toolSignatures: threadToolSignatures,
 					createdAt: Date.now(),
 					processGeneration: this.client.generation,
 				};
@@ -606,7 +737,12 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 					threadId,
 					modelId: model.id,
 					runtimeKey: threadRuntimeKey,
+					toolCatalogKey: threadToolCatalogKey,
 					callableNames: threadCallableNames,
+					toolNamespaces: threadToolNamespaces,
+					toolSignatures: threadToolSignatures,
+					copilotConversationId,
+					copilotTurnIndex,
 					anchor: createCodexConversationAnchor(messages, finalText),
 					lastUsedAt: Date.now(),
 					processGeneration: this.client.generation,
@@ -716,10 +852,6 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			}
 			this.conversationThreads.delete(oldest.threadId);
 		}
-	}
-
-	private createRuntimeKey(value: Record<string, unknown>): string {
-		return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 	}
 
 	private mapKnownModels(): vscode.LanguageModelChatInformation[] {

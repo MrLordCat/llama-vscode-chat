@@ -71,16 +71,23 @@ built-ins while preserving native Copilot execution and tool cards.
 
 Completed conversation threads stay available in memory for up to four hours
 (maximum 16). Reuse first checks the complete SHA-256 history and answer
-digests. If Copilot rewrote older service/context messages, a safe fallback
-requires the exact prior answer plus an unchanged adjacent history suffix.
-Model, workspace, sandbox, approval policy, dynamic tool catalog, and app-server
-process generation must still match. Editing the recent semantic history,
-regenerating an answer, changing runtime configuration, restarting Codex, or
-missing the cache starts a fresh thread with the bounded full Copilot history.
+digests. Copilot patch v7 additionally forwards a stable conversation id and
+turn index so the provider can tolerate rewritten service, tool, or rendered
+prompt history while still requiring an advancing turn and the exact prior
+answer. Without the patch, a conservative fallback ignores mutable tool
+plumbing but requires the complete bounded suffix of recent semantic user
+messages. Model, workspace, sandbox, approval policy, and app-server process
+generation must still match. The dynamic tool catalog may drift: a reused thread retains the
+catalog and namespace routes supplied at `thread/start`, while the provider
+allows only the intersection with the current Copilot request. Newly advertised
+tools wait for a fresh thread; removed, re-namespaced, and schema-changed tools
+are unavailable. Editing a recent user request, regenerating an answer, changing
+runtime configuration, restarting Codex, or missing the cache starts a fresh
+thread with the bounded full Copilot history.
 Quick Access reports both the in-process thread-reuse ratio and the last
 prompt-cache percentage returned by Codex. Body-free
 codex.chat.thread_reuse_miss events categorize reuse failures without logging
-conversation text or hashes.
+conversation ids, text, or hashes.
 
 This design also supports private caller tools that are not present in
 `vscode.lm.tools`, including Copilot's terminal implementation. Native calls use

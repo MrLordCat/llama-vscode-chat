@@ -36,20 +36,24 @@ export interface CodexToolContinuation {
 export interface CodexConversationAnchor {
 	messageCount: number;
 	messageDigest: string;
-	historySuffixDigests: string[];
+	userHistorySuffixDigests: string[];
 	assistantTextDigest: string;
 }
 
 export type CodexConversationTailMissReason =
 	| "no-follow-up"
 	| "assistant-answer-missing"
-	| "history-suffix-changed";
+	| "user-history-suffix-changed";
 
 export interface CodexConversationTailMatch {
 	tail?: readonly vscode.LanguageModelChatRequestMessage[];
-	strategy?: "exact" | "suffix";
-	matchedHistoryMessages: number;
+	strategy?: "exact" | "conversation-id" | "suffix";
+	matchedUserMessages: number;
 	missReason?: CodexConversationTailMissReason;
+}
+
+export interface CodexConversationTailMatchOptions {
+	trustedConversation?: boolean;
 }
 
 const DEFAULT_MAX_CODEX_INPUT_CHARS = 600_000;
@@ -59,7 +63,7 @@ const DEFAULT_MAX_TOOL_RESULT_CHARS = 12_000;
 const MIN_MAX_TOOL_RESULT_CHARS = 1_024;
 const MAX_MAX_TOOL_RESULT_CHARS = 100_000;
 const MAX_PRESERVED_FIRST_MESSAGE_CHARS = 32_000;
-const CODEX_ANCHOR_SUFFIX_MESSAGES = 8;
+const CODEX_ANCHOR_USER_MESSAGES = 8;
 const COMPACTION_MARKER = "[Earlier VS Code conversation messages were omitted by the provider to fit the Codex input budget.]";
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -118,6 +122,48 @@ function hashAssistantText(value: string): string {
 	return createHash("sha256").update(value).digest("hex");
 }
 
+function hashCodexUserSemanticMessage(message: vscode.LanguageModelChatRequestMessage): string | undefined {
+	if (message.role !== vscode.LanguageModelChatMessageRole.User) {
+		return undefined;
+	}
+	const hash = createHash("sha256");
+	hash.update("user\0").update(message.name ?? "").update("\0");
+	let semanticPartCount = 0;
+	for (const part of message.content) {
+		// Tool results are already part of the live Codex thread. Copilot may
+		// normalize their call ids or payload representation after completion.
+		if (part instanceof vscode.LanguageModelToolResultPart || part instanceof vscode.LanguageModelToolCallPart) {
+			continue;
+		}
+		if (part instanceof vscode.LanguageModelTextPart || part instanceof vscode.LanguageModelDataPart) {
+			updatePartDigest(hash, part);
+			semanticPartCount++;
+			continue;
+		}
+		const unknownText = collectUnknownText(part);
+		if (unknownText) {
+			hash.update("other\0").update(unknownText).update("\0");
+			semanticPartCount++;
+		}
+	}
+	return semanticPartCount > 0 ? hash.digest("hex") : undefined;
+}
+
+function getCodexUserSemanticSuffixDigests(
+	messages: readonly vscode.LanguageModelChatRequestMessage[],
+	messageCount = messages.length
+): string[] {
+	const digests: string[] = [];
+	const count = Math.max(0, Math.min(messages.length, messageCount));
+	for (let index = 0; index < count; index++) {
+		const digest = hashCodexUserSemanticMessage(messages[index]);
+		if (digest) {
+			digests.push(digest);
+		}
+	}
+	return digests.slice(-CODEX_ANCHOR_USER_MESSAGES);
+}
+
 export function hashCodexMessages(
 	messages: readonly vscode.LanguageModelChatRequestMessage[],
 	messageCount = messages.length
@@ -147,9 +193,7 @@ export function createCodexConversationAnchor(
 	return {
 		messageCount: messages.length,
 		messageDigest: hashCodexMessages(messages),
-		historySuffixDigests: messages
-			.slice(-CODEX_ANCHOR_SUFFIX_MESSAGES)
-			.map(message => hashCodexMessage(message)),
+		userHistorySuffixDigests: getCodexUserSemanticSuffixDigests(messages),
 		assistantTextDigest: hashAssistantText(assistantText),
 	};
 }
@@ -158,16 +202,17 @@ function isUserFollowUp(messages: readonly vscode.LanguageModelChatRequestMessag
 	return messages.some(message => message.role === vscode.LanguageModelChatMessageRole.User);
 }
 
-function countMatchingHistorySuffix(
+function countMatchingUserSemanticSuffix(
 	messages: readonly vscode.LanguageModelChatRequestMessage[],
 	assistantIndex: number,
 	anchor: CodexConversationAnchor
 ): number {
-	const expected = anchor.historySuffixDigests;
+	const expected = anchor.userHistorySuffixDigests;
+	const actual = getCodexUserSemanticSuffixDigests(messages, assistantIndex);
 	let matched = 0;
-	while (matched < expected.length && assistantIndex - matched - 1 >= 0) {
+	while (matched < expected.length && matched < actual.length) {
 		const expectedDigest = expected[expected.length - matched - 1];
-		const actualDigest = hashCodexMessage(messages[assistantIndex - matched - 1]);
+		const actualDigest = actual[actual.length - matched - 1];
 		if (actualDigest !== expectedDigest) {
 			break;
 		}
@@ -179,13 +224,14 @@ function countMatchingHistorySuffix(
 /**
  * Matches a completed provider response to the next Copilot request.
  *
- * The exact path is cheapest. The suffix path tolerates Copilot rewriting old
- * service/context messages while still requiring the exact prior answer and at
- * least one unchanged immediately preceding conversation message.
+ * The exact path is cheapest. The suffix path tolerates Copilot normalizing
+ * completed tool-call/result plumbing while still requiring the exact prior
+ * answer and the complete recent suffix of semantic user messages.
  */
 export function matchCodexConversationTail(
 	messages: readonly vscode.LanguageModelChatRequestMessage[],
-	anchor: CodexConversationAnchor
+	anchor: CodexConversationAnchor,
+	options: CodexConversationTailMatchOptions = {}
 ): CodexConversationTailMatch {
 	if (messages.length > anchor.messageCount + 1 && hashCodexMessages(messages, anchor.messageCount) === anchor.messageDigest) {
 		const priorAssistant = messages[anchor.messageCount];
@@ -195,7 +241,7 @@ export function matchCodexConversationTail(
 			return {
 				tail,
 				strategy: "exact",
-				matchedHistoryMessages: anchor.messageCount,
+				matchedUserMessages: anchor.userHistorySuffixDigests.length,
 			};
 		}
 	}
@@ -211,20 +257,30 @@ export function matchCodexConversationTail(
 		if (!isUserFollowUp(tail)) {
 			continue;
 		}
-		const matchedHistoryMessages = countMatchingHistorySuffix(messages, assistantIndex, anchor);
-		if (matchedHistoryMessages > 0) {
+		if (options.trustedConversation === true) {
+			return {
+				tail,
+				strategy: "conversation-id",
+				matchedUserMessages: 0,
+			};
+		}
+		const matchedUserMessages = countMatchingUserSemanticSuffix(messages, assistantIndex, anchor);
+		if (
+			anchor.userHistorySuffixDigests.length > 0
+			&& matchedUserMessages === anchor.userHistorySuffixDigests.length
+		) {
 			return {
 				tail,
 				strategy: "suffix",
-				matchedHistoryMessages,
+				matchedUserMessages,
 			};
 		}
 	}
 
 	return {
-		matchedHistoryMessages: 0,
+		matchedUserMessages: 0,
 		missReason: foundAssistant
-			? "history-suffix-changed"
+			? "user-history-suffix-changed"
 			: messages.length <= anchor.messageCount + 1
 				? "no-follow-up"
 				: "assistant-answer-missing",

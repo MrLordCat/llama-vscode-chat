@@ -3,7 +3,12 @@ import * as vscode from "vscode";
 
 import { CodexAppServerClient, JsonLineBuffer, type CodexServerNotification } from "../codex/app-server-client";
 import { CompositeChatModelProvider } from "../composite-provider";
-import { canResumeCodexToolTurn, CodexChatModelProvider } from "../codex/codex-provider";
+import {
+	canResumeCodexToolTurn,
+	CodexChatModelProvider,
+	createCodexRuntimeFingerprints,
+	intersectCodexThreadTools,
+} from "../codex/codex-provider";
 import {
 	buildCodexDynamicTools,
 	CODEX_DEFERRED_TOOL_NAMESPACE,
@@ -398,6 +403,61 @@ suite("Codex subscription provider", () => {
 		}), false);
 	});
 
+	test("keeps completed-thread runtime identity stable across tool catalog changes", () => {
+		const before = createCodexRuntimeFingerprints({
+			modelId: "gpt-test",
+			cwd: "workspace",
+			approvalPolicy: "on-request",
+			sandbox: "workspace-write",
+			dynamicTools: [{ name: "read_file" }],
+		});
+		const after = createCodexRuntimeFingerprints({
+			modelId: "gpt-test",
+			cwd: "workspace",
+			approvalPolicy: "on-request",
+			sandbox: "workspace-write",
+			dynamicTools: [{ name: "read_file" }, { name: "grep_search" }],
+		});
+		const changedSandbox = createCodexRuntimeFingerprints({
+			modelId: "gpt-test",
+			cwd: "workspace",
+			approvalPolicy: "on-request",
+			sandbox: "read-only",
+			dynamicTools: [{ name: "read_file" }, { name: "grep_search" }],
+		});
+		assert.strictEqual(before.runtimeKey, after.runtimeKey);
+		assert.notStrictEqual(before.toolCatalogKey, after.toolCatalogKey);
+		assert.notStrictEqual(after.runtimeKey, changedSandbox.runtimeKey);
+	});
+
+	test("reuses only the safe intersection of stored and current thread tools", () => {
+		const effective = intersectCodexThreadTools(
+			new Set(["read_file", "apply_patch", "removed_tool", "changed_tool"]),
+			new Map([
+				["apply_patch", CODEX_NATIVE_TOOL_NAMESPACE],
+				["removed_tool", CODEX_DEFERRED_TOOL_NAMESPACE],
+			]),
+			new Map([
+				["read_file", "read-v1"],
+				["apply_patch", "patch-v1"],
+				["removed_tool", "removed-v1"],
+				["changed_tool", "changed-v1"],
+			]),
+			new Set(["read_file", "apply_patch", "new_tool", "changed_tool"]),
+			new Map([
+				["read_file", "read-v1"],
+				["apply_patch", "patch-v1"],
+				["new_tool", "new-v1"],
+				["changed_tool", "changed-v2"],
+			])
+		);
+		assert.deepStrictEqual(effective.callableNames, new Set(["read_file", "apply_patch"]));
+		assert.deepStrictEqual(
+			effective.toolNamespaces,
+			new Map([["apply_patch", CODEX_NATIVE_TOOL_NAMESPACE]])
+		);
+	});
+
 	test("bounds native tool output before returning it to the active Codex turn", () => {
 		const result = new vscode.LanguageModelToolResultPart("call", [
 			new vscode.LanguageModelTextPart(`HEAD\n${"x".repeat(20_000)}\nTAIL`),
@@ -431,21 +491,31 @@ suite("Codex subscription provider", () => {
 		assert.strictEqual(findCodexConversationTail(edited, anchor), undefined);
 	});
 
-	test("reuses a completed conversation when Copilot rewrites only older service context", () => {
+	test("reuses a completed conversation when Copilot rewrites historical tool plumbing", () => {
 		const original = [
-			vscode.LanguageModelChatMessage.User("service context version one"),
 			vscode.LanguageModelChatMessage.User("original request"),
+			vscode.LanguageModelChatMessage.Assistant([
+				new vscode.LanguageModelToolCallPart("live-call", "read_file", { path: "before.ts" }),
+			]),
+			vscode.LanguageModelChatMessage.User([
+				new vscode.LanguageModelToolResultPart("live-call", [new vscode.LanguageModelTextPart("live result")]),
+			]),
 		];
 		const anchor = createCodexConversationAnchor(original, "completed answer");
 		const nextTurn = [
-			vscode.LanguageModelChatMessage.User("service context version two"),
 			vscode.LanguageModelChatMessage.User("original request"),
+			vscode.LanguageModelChatMessage.Assistant([
+				new vscode.LanguageModelToolCallPart("persisted-call", "read_file", { path: "after.ts" }),
+			]),
+			vscode.LanguageModelChatMessage.User([
+				new vscode.LanguageModelToolResultPart("persisted-call", [new vscode.LanguageModelTextPart("persisted result")]),
+			]),
 			vscode.LanguageModelChatMessage.Assistant("completed answer"),
 			vscode.LanguageModelChatMessage.User("follow-up request"),
 		];
 		const match = matchCodexConversationTail(nextTurn, anchor);
 		assert.strictEqual(match.strategy, "suffix");
-		assert.strictEqual(match.matchedHistoryMessages, 1);
+		assert.strictEqual(match.matchedUserMessages, 1);
 		assert.strictEqual(match.tail?.length, 1);
 		assert.strictEqual(
 			(match.tail?.[0].content[0] as vscode.LanguageModelTextPart).value,
@@ -455,19 +525,68 @@ suite("Codex subscription provider", () => {
 
 	test("rejects suffix reuse when the latest semantic request changed", () => {
 		const original = [
-			vscode.LanguageModelChatMessage.User("service context"),
 			vscode.LanguageModelChatMessage.User("original request"),
+			vscode.LanguageModelChatMessage.Assistant([
+				new vscode.LanguageModelToolCallPart("call", "read_file", { path: "file.ts" }),
+			]),
+			vscode.LanguageModelChatMessage.User([
+				new vscode.LanguageModelToolResultPart("call", [new vscode.LanguageModelTextPart("result")]),
+			]),
 		];
 		const anchor = createCodexConversationAnchor(original, "same answer");
 		const edited = [
-			vscode.LanguageModelChatMessage.User("updated service context"),
 			vscode.LanguageModelChatMessage.User("edited original request"),
+			vscode.LanguageModelChatMessage.Assistant([
+				new vscode.LanguageModelToolCallPart("persisted-call", "read_file", { path: "file.ts" }),
+			]),
+			vscode.LanguageModelChatMessage.User([
+				new vscode.LanguageModelToolResultPart("persisted-call", [new vscode.LanguageModelTextPart("result")]),
+			]),
 			vscode.LanguageModelChatMessage.Assistant("same answer"),
 			vscode.LanguageModelChatMessage.User("follow-up"),
 		];
 		const match = matchCodexConversationTail(edited, anchor);
 		assert.strictEqual(match.tail, undefined);
-		assert.strictEqual(match.missReason, "history-suffix-changed");
+		assert.strictEqual(match.missReason, "user-history-suffix-changed");
+	});
+
+	test("uses trusted Copilot conversation identity across unstable rendered history", () => {
+		const original = [
+			vscode.LanguageModelChatMessage.User("original request"),
+			vscode.LanguageModelChatMessage.User("generated service context before completion"),
+		];
+		const anchor = createCodexConversationAnchor(original, "completed answer");
+		const nextTurn = [
+			vscode.LanguageModelChatMessage.User("rewritten service context"),
+			vscode.LanguageModelChatMessage.User("different rendered plumbing"),
+			vscode.LanguageModelChatMessage.Assistant("completed answer"),
+			vscode.LanguageModelChatMessage.User("follow-up request"),
+		];
+		const untrusted = matchCodexConversationTail(nextTurn, anchor);
+		assert.strictEqual(untrusted.tail, undefined);
+		assert.strictEqual(untrusted.missReason, "user-history-suffix-changed");
+
+		const trusted = matchCodexConversationTail(nextTurn, anchor, { trustedConversation: true });
+		assert.strictEqual(trusted.strategy, "conversation-id");
+		assert.strictEqual(trusted.matchedUserMessages, 0);
+		assert.strictEqual(trusted.tail?.length, 1);
+		assert.strictEqual(
+			(trusted.tail?.[0].content[0] as vscode.LanguageModelTextPart).value,
+			"follow-up request"
+		);
+	});
+
+	test("trusted Copilot identity still requires the exact prior answer", () => {
+		const original = [vscode.LanguageModelChatMessage.User("request")];
+		const anchor = createCodexConversationAnchor(original, "expected answer");
+		const regenerated = [
+			vscode.LanguageModelChatMessage.User("rewritten request context"),
+			vscode.LanguageModelChatMessage.Assistant("different answer"),
+			vscode.LanguageModelChatMessage.User("follow-up"),
+		];
+		const match = matchCodexConversationTail(regenerated, anchor, { trustedConversation: true });
+		assert.strictEqual(match.tail, undefined);
+		assert.strictEqual(match.missReason, "assistant-answer-missing");
 	});
 
 	test("does not reuse a conversation when the prior assistant answer differs", () => {
