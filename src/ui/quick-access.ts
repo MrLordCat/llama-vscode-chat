@@ -71,7 +71,8 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 		private readonly getLastPromptCache: () => string | undefined = () => undefined,
 		private readonly getSessionSummary: () => string | undefined = () => undefined,
 		private readonly getHealthStatus: () => string | undefined = () => undefined,
-		private readonly getExpiredMemoryCount: () => number = () => 0
+		private readonly getExpiredMemoryCount: () => number = () => 0,
+		private readonly getCodexStatus: () => string | undefined = () => undefined
 	) {}
 
 	refresh(): void {
@@ -95,6 +96,9 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 		const localServerUrl = String(config.get("localServerUrl", DEFAULT_SERVER_URL) || DEFAULT_SERVER_URL);
 		const localServerEnabled = config.get<boolean>("enableLocalServer", true) !== false;
 		const deepSeekEnabled = config.get<boolean>("enableDeepSeek", true) !== false;
+		const codexEnabled = config.get<boolean>("enableCodexSubscription", true) !== false;
+		const codexVsCodeToolsEnabled = config.get<boolean>("codexUseVsCodeTools", true) !== false;
+		const codexDeferredToolsEnabled = config.get<boolean>("codexDeferNonCoreTools", true) !== false;
 		const thinkingMode = String(config.get("thinkingMode", "auto"));
 		const reasoningBudget = Number(config.get("reasoningBudget", DEFAULT_LOCAL_REASONING_BUDGET));
 		const effectiveReasoningBudget = resolveReasoningBudget(
@@ -119,9 +123,10 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 		const lastPromptCache = this.getLastPromptCache();
 		const sessionSummary = this.getSessionSummary();
 		const healthStatus = this.getHealthStatus();
+		const codexStatus = this.getCodexStatus();
 
 		const connections = new QuickAccessItem("connections", "Connections", {
-			description: `Local ${localServerEnabled ? "on" : "off"} · DeepSeek ${deepSeekEnabled ? "on" : "off"}`,
+			description: `Local ${localServerEnabled ? "on" : "off"} / DeepSeek ${deepSeekEnabled ? "on" : "off"} / Codex ${codexEnabled ? "on" : "off"}`,
 			icon: new vscode.ThemeIcon("server-environment"),
 			expanded: true,
 			children: [
@@ -153,6 +158,22 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 					description: "API key and profile",
 					icon: new vscode.ThemeIcon("cloud"),
 					command: command("llamacpp.configureDeepSeek", "Configure DeepSeek"),
+				}),
+				new QuickAccessItem("connections.codexSource", "Codex Subscription", {
+					description: codexEnabled ? "On" : "Off",
+					tooltip: "Advertise Codex models backed by the signed-in ChatGPT subscription",
+					icon: toggleIcon(codexEnabled),
+					command: command("llamacpp.toggleCodexSubscription", "Toggle Codex Subscription Source"),
+				}),
+				new QuickAccessItem("connections.codexStatus", "Codex Account", {
+					description: codexStatus ?? "Checking...",
+					tooltip: "Read the ChatGPT plan, subscription usage, in-memory thread reuse, and last reported prompt-cache hit without exposing OAuth tokens",
+					icon: new vscode.ThemeIcon("account"),
+					command: command("llamacpp.codexShowStatus", "Show Codex Subscription Status"),
+				}),
+				new QuickAccessItem("connections.codexSignIn", "Sign In to Codex", {
+					icon: new vscode.ThemeIcon("sign-in"),
+					command: command("llamacpp.codexSignIn", "Sign In to Codex Subscription"),
 				}),
 				new QuickAccessItem("connections.primaryKey", "Primary API Key", {
 					icon: new vscode.ThemeIcon("key"),
@@ -187,6 +208,18 @@ export class LlamaQuickActionsProvider implements vscode.TreeDataProvider<QuickA
 					description: toolResultMode,
 					icon: new vscode.ThemeIcon("output"),
 					command: command("llamacpp.setToolResultMode", "Set Tool Result Mode"),
+				}),
+				new QuickAccessItem("modelBehavior.codexVsCodeTools", "Codex VS Code Tools", {
+					description: codexVsCodeToolsEnabled ? "On" : "Off",
+					tooltip: "Delegate Codex-selected actions to native Copilot tool cards and the current session approval mode.",
+					icon: toggleIcon(codexVsCodeToolsEnabled),
+					command: command("llamacpp.toggleCodexVsCodeTools", "Toggle Codex VS Code Tools"),
+				}),
+				new QuickAccessItem("modelBehavior.codexDeferredTools", "Codex Deferred Tools", {
+					description: codexDeferredToolsEnabled ? "On" : "Off",
+					tooltip: "Keep core coding tools eager and load uncommon Copilot tool schemas on demand to reduce prompt overhead.",
+					icon: toggleIcon(codexDeferredToolsEnabled),
+					command: command("llamacpp.toggleCodexDeferredTools", "Toggle Codex Deferred Tools"),
 				}),
 				new QuickAccessItem("modelBehavior.knowledge", "Knowledge Verification", {
 					description: knowledgeMode,

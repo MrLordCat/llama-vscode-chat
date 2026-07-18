@@ -1,16 +1,20 @@
 # Local LLM Chat Provider for VS Code
 
 Independent extension by MrLordCat focused on making VS Code Chat work well
-with OpenAI-compatible local servers and the official DeepSeek API.
+with OpenAI-compatible local servers, the official DeepSeek API, and OpenAI
+Codex through a ChatGPT subscription.
 
-The extension registers a `llamacpp` language model provider for VS Code Chat,
-so GitHub Copilot Chat and agent workflows can use local or remote models while
-keeping tool calling, streaming responses, context budgeting, and diagnostics.
+The extension registers one picker-compatible `llamacpp` language model
+provider for VS Code Chat and routes its Local, DeepSeek, and Codex model ids to
+independent transports. GitHub Copilot Chat and agent workflows can therefore
+use local, remote API, or subscription-backed models without switching URLs.
 
 ## Goals
 
 - Use a local llama.cpp server efficiently from VS Code Chat.
 - Support DeepSeek V4 Pro / Flash through the official OpenAI-compatible API.
+- Use Codex subscription models without converting ChatGPT OAuth credentials
+  into an API key or replacing the local server configuration.
 - Keep tool calling usable for coding-agent workflows.
 - Reduce prompt/tool token overhead with API Direct mode.
 - Avoid long-session stalls from huge tool results, stream spam, or oversized
@@ -27,6 +31,9 @@ keeping tool calling, streaming responses, context budgeting, and diagnostics.
   - primary OpenAI-compatible server from `llamacpp.serverUrl`
   - dedicated local server from `llamacpp.localServerUrl`
   - DeepSeek API from `https://api.deepseek.com`
+- A separate Codex Subscription provider backed by the official local
+  `codex app-server`, with dynamic model discovery, native reasoning-effort
+  choices, subscription usage status, cancellation, and approval prompts.
 - Adaptive text/reasoning chunk coalescing to reduce VS Code UI stalls, with
   upstream stream cancellation so stopped turns release the llama.cpp slot.
 - Tool calling with OpenAI `tools` and `tool` result messages.
@@ -139,11 +146,63 @@ profile:
 request more output, so keeping the DeepSeek maximum available no longer forces
 every turn to reserve 393216 tokens.
 
+## Quick Start: Codex Subscription
+
+Codex is an independent model provider and does not replace the local llama.cpp
+or DeepSeek sources.
+
+1. Install the official OpenAI Codex VS Code extension or install Codex CLI on
+   `PATH`.
+2. Run `Local LLM: Sign In to Codex Subscription`. An existing `codex login`
+   session is detected automatically.
+3. Run `Local LLM: Refresh Models`.
+4. Select a model labelled `(Codex)` in the native chat model picker.
+
+The extension starts `codex app-server --stdio` and lets that official process
+own OAuth login, token refresh, model discovery, and subscription limits. It
+does not read or copy `~/.codex/auth.json`. Requests are refused when Codex is
+using API-key auth, preventing accidental API billing through this provider.
+
+Recommended defaults:
+
+```json
+{
+  "llamacpp.enableCodexSubscription": true,
+  "llamacpp.codexReasoningEffort": "auto",
+  "llamacpp.codexReasoningSummary": "auto",
+  "llamacpp.codexSandboxMode": "workspace-write",
+  "llamacpp.codexApprovalPolicy": "on-request",
+  "llamacpp.codexFastServiceTier": false,
+  "llamacpp.codexEphemeralThreads": true,
+  "llamacpp.codexContextLength": 258400,
+  "llamacpp.codexMaxInputChars": 600000,
+  "llamacpp.codexMaxToolResultChars": 12000,
+  "llamacpp.codexUseVsCodeTools": true,
+  "llamacpp.codexDeferNonCoreTools": true,
+  "llamacpp.codexMaxOutputTokens": 32768
+}
+```
+
+For Codex models, Copilot Chat is the interface and durable conversation owner,
+while Codex runs its agent loop and selects from the outer Copilot tool catalog.
+The provider emits each selection as a normal `LanguageModelToolCallPart`, so
+Copilot renders and executes command, search, file, web, and memory tools using
+its native cards and current session approval mode. Native tool-result rounds
+continue the same app-server turn, while unchanged follow-up user turns reuse
+the active ephemeral Codex thread and send only incremental input. This avoids
+extra model turns and full conversation resends for agent steps. Parallel tool
+calls are returned as one native batch, and omitted history images are not sent
+again. Reuse is guarded by conversation and runtime fingerprints; Quick Access
+shows the current reuse ratio and last reported prompt-cache hit. See
+[Codex Subscription](docs/CODEX_SUBSCRIPTION.md) for the architecture, security
+model, settings, and troubleshooting.
+
 ## Model Sources
 
-The provider can advertise models from several OpenAI-compatible endpoints at
-once. In the VS Code model picker they are shown with their source label, for
-example `qwen3-local (Local)` and `deepseek-v4-pro (DeepSeek)`.
+The extension can advertise models from several OpenAI-compatible endpoints and
+the independent Codex runtime at once. In the VS Code model picker they are
+shown with their source label, for example `qwen3-local (Local)`,
+`deepseek-v4-pro (DeepSeek)`, and `GPT-5.6-Sol (Codex)`.
 
 Internally the provider keeps source-prefixed model ids such as
 `local::qwen3-local` and `deepseek::deepseek-v4-pro`, then strips the prefix

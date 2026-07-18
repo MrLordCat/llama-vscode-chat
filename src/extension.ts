@@ -25,6 +25,8 @@ import { SharedMemoryService } from "./memory/shared-memory-service";
 import { registerMemoryTools } from "./memory/tools";
 import { registerModelBehaviorCommands } from "./ui/model-behavior-commands";
 import { LlamaQuickActionsProvider } from "./ui/quick-access";
+import { CodexChatModelProvider } from "./codex/codex-provider";
+import { CompositeChatModelProvider } from "./composite-provider";
 
 interface ContextUsageDisplay {
 	summary: string;
@@ -156,7 +158,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	// Llama.cpp Provider
 	const llamaProvider = new LlamaCppChatModelProvider(context.secrets, ua, logService, memoryService);
-	context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider(PROVIDER_VENDOR, llamaProvider));
+	const codexProvider = new CodexChatModelProvider(extVersion, logService);
+	context.subscriptions.push(codexProvider);
+	const compositeProvider = new CompositeChatModelProvider(llamaProvider, codexProvider);
+	context.subscriptions.push(compositeProvider);
+	context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider(PROVIDER_VENDOR, compositeProvider));
 	let lastThroughput: string | undefined;
 	let lastPromptCache: string | undefined;
 	let lastContextUsage: ContextUsageDisplay | undefined;
@@ -168,12 +174,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		() => lastPromptCache,
 		() => sessionQuality.count === 0 ? "No turns" : `${sessionQuality.count} turns / cache ${sessionQuality.summary.cacheHitPercent ?? "n/a"}%`,
 		() => lastHealthStatus,
-		() => memoryService.expiredCount
+		() => memoryService.expiredCount,
+		() => codexProvider.statusSummary
 	);
 	context.subscriptions.push(vscode.window.registerTreeDataProvider("llamacpp-quick-actions", quickActionsProvider));
 	context.subscriptions.push(memoryService.onDidChange(() => quickActionsProvider.refresh()));
+	context.subscriptions.push(codexProvider.onDidChangeStatus(() => quickActionsProvider.refresh()));
 	context.subscriptions.push(...registerModelBehaviorCommands(() => quickActionsProvider.refresh()));
 	llamaProvider.refreshLanguageModelChatInformation();
+	codexProvider.refreshLanguageModelChatInformation();
+	void codexProvider.refreshStatus().catch(error => logService.logError("codex.initial_status.failed", error));
 
 	const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 95);
 	performanceStatusBar.name = "Local LLM Throughput";
@@ -388,6 +398,83 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	);
 
 	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.toggleCodexSubscription", async () => {
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+			const next = config.get<boolean>("enableCodexSubscription", true) === false;
+			await config.update("enableCodexSubscription", next, vscode.ConfigurationTarget.Global);
+			codexProvider.refreshLanguageModelChatInformation();
+			await codexProvider.refreshStatus();
+			quickActionsProvider.refresh();
+			vscode.window.showInformationMessage(`Codex subscription source ${next ? "enabled" : "disabled"}.`);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.toggleCodexVsCodeTools", async () => {
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+			const next = config.get<boolean>("codexUseVsCodeTools", true) === false;
+			await config.update("codexUseVsCodeTools", next, vscode.ConfigurationTarget.Global);
+			quickActionsProvider.refresh();
+			vscode.window.showInformationMessage(`Codex VS Code tools ${next ? "enabled" : "disabled"}.`);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.toggleCodexDeferredTools", async () => {
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+			const next = config.get<boolean>("codexDeferNonCoreTools", true) === false;
+			await config.update("codexDeferNonCoreTools", next, vscode.ConfigurationTarget.Global);
+			quickActionsProvider.refresh();
+			vscode.window.showInformationMessage(`Codex deferred tools ${next ? "enabled" : "disabled"}.`);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.codexSignIn", async () => {
+			try {
+				await codexProvider.signIn();
+				quickActionsProvider.refresh();
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				vscode.window.showErrorMessage(`Unable to sign in to Codex: ${message}`);
+			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.codexSignOut", async () => {
+			const confirmed = await vscode.window.showWarningMessage(
+				"Sign out of Codex? This also signs out the shared local Codex CLI session.",
+				{ modal: true },
+				"Sign Out"
+			);
+			if (confirmed !== "Sign Out") {
+				return;
+			}
+			try {
+				await codexProvider.signOut();
+				quickActionsProvider.refresh();
+				vscode.window.showInformationMessage("Codex signed out.");
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				vscode.window.showErrorMessage(`Unable to sign out of Codex: ${message}`);
+			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.codexShowStatus", async () => {
+			try {
+				await codexProvider.showStatus();
+				quickActionsProvider.refresh();
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				vscode.window.showErrorMessage(`Unable to read Codex status: ${message}`);
+			}
+		})
+	);
+
+	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.setApiKey", async () => {
 			const existingApiKey = await context.secrets.get("llamacpp.apiKey");
 			const apiKey = await vscode.window.showInputBox({
@@ -535,8 +622,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.refreshModels", async () => {
 			llamaProvider.refreshLanguageModelChatInformation();
+			codexProvider.refreshLanguageModelChatInformation();
+			void codexProvider.refreshStatus();
 			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage("Local LLM models refreshed.");
+			vscode.window.showInformationMessage("Local, DeepSeek, and Codex models refreshed.");
 		})
 	);
 
@@ -659,6 +748,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					event.affectsConfiguration("llamacpp.modelListCacheTtlMs")
 				) {
 					llamaProvider.refreshLanguageModelChatInformation();
+				}
+				if (
+					event.affectsConfiguration("llamacpp.enableCodexSubscription") ||
+					event.affectsConfiguration("llamacpp.codexCliPath") ||
+					event.affectsConfiguration("llamacpp.codexContextLength") ||
+					event.affectsConfiguration("llamacpp.codexMaxOutputTokens")
+				) {
+					codexProvider.refreshLanguageModelChatInformation();
+					void codexProvider.refreshStatus();
 				}
 				quickActionsProvider.refresh();
 			}
