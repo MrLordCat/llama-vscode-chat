@@ -1443,9 +1443,10 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         const maxInputTokens = Math.max(1, contextLength - maxOutputTokens);
         const maxTools = this.clampInt(this.getConfig().get("maxToolsPerRequest", 128), 0, 128, 128);
 
-        // Detect vision (image input) support.
-        // DeepSeek API does NOT support image input (both OpenAI-compatible and Anthropic endpoints
-        // reject image_url / image content blocks). For other providers check model metadata.
+        // Detect vision (image input) support from model metadata.
+        // The API itself decides whether to accept image content blocks;
+        // if the model (e.g. DeepSeek) supports vision it may use tools
+        // like view_image to inspect attached images.
         const archMeta = model.meta as Record<string, unknown> | undefined;
         const inputModalities = (archMeta?.architecture as Record<string, unknown> | undefined)
             ?.input_modalities as string[] | undefined;
@@ -1456,14 +1457,11 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         const capabilities = [...(model.capabilities ?? []), ...metaCapabilities]
             .map(value => value.toLowerCase());
         const imageInput =
-            family !== "deepseek" &&
-            (
-                model.modalities?.vision === true ||
-                metaModalities?.vision === true ||
-                (Array.isArray(inputModalities) && inputModalities.includes("image")) ||
-                capabilities.includes("vision") ||
-                capabilities.includes("multimodal")
-            );
+            model.modalities?.vision === true ||
+            metaModalities?.vision === true ||
+            (Array.isArray(inputModalities) && inputModalities.includes("image")) ||
+            capabilities.includes("vision") ||
+            capabilities.includes("multimodal");
 
         const info: LanguageModelChatInformation & Record<string, unknown> = {
             id: encodeProviderModelId(source.key, model.id),
