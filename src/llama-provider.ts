@@ -1,6 +1,6 @@
 
 import * as vscode from "vscode";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -17,6 +17,7 @@ import {
     CONFIG_SECTION,
     DEFAULT_LOCAL_REASONING_BUDGET,
     DEEPSEEK_CONTEXT_LENGTH,
+    DEFAULT_DEEPSEEK_CONTEXT_LIMIT,
     DEEPSEEK_MAX_OUTPUT_TOKENS,
     DEFAULT_SERVER_URL,
 } from "./constants";
@@ -32,18 +33,19 @@ import {
     normalizeKnowledgeMode,
 } from "./context/system-prompt";
 import { summarizeToolResultContent } from "./context/tool-result-summary";
-import { calculatePromptCacheUsage, estimateChatTokenUsage, type ChatTokenUsage } from "./context/usage";
+import { calculatePromptCacheUsage, estimateChatTokenUsage, mergeChatTokenUsage, type ChatTokenUsage } from "./context/usage";
 import {
     calculateOverallHealth,
     type HealthCheckItem,
     type ProviderHealthReport,
     type ProviderHealthSourceReport,
 } from "./diagnostics/provider-health";
-import { convertMessages, convertTools, validateRequest, type ToolCallingMode, type ToolResultMode } from "./utils";
+import { convertMessages, convertTools, stableJsonStringify, validateRequest, type ToolCallingMode, type ToolResultMode } from "./utils";
 import { LlamaLogSink } from "./logger";
 import { buildMemoryQuery, injectSharedMemoryContext } from "./memory/prompt";
 import { getCurrentWorkspaceScopeId } from "./memory/scope";
 import type { SharedMemoryContextProvider, SharedMemoryPromptContext } from "./memory/types";
+import { setSubagentModelProfiles } from "./subagent-guidance";
 import {
     createModelSources,
     encodeProviderModelId,
@@ -110,10 +112,13 @@ export interface LlamaChatTurnMetrics {
     outputChars: number;
     thinkingChars: number;
     estimatedOutputTokens: number;
+    outputTokens?: number;
     tokensPerSecond?: number;
     promptTokens: number;
     cachedPromptTokens?: number;
     promptCacheHitPercent?: number;
+    modelTurns: number;
+    usageEstimated: boolean;
     retriedAfterOverflow: boolean;
     toolCalls: number;
     repairedToolCalls: number;
@@ -158,6 +163,14 @@ interface PreparedMessagesForBudget {
     tokenCountSource: "server" | "heuristic";
 }
 
+interface CachePrefixSnapshot {
+    requestId: string;
+    staticFieldsHash: string;
+    toolsHash: string;
+    messageParts: string[];
+    messageChars: number;
+}
+
 /**
  * Chat model provider for Llama.cpp servers.
  * Implements the VS Code language model chat provider interface for Llama.cpp compatible APIs.
@@ -174,6 +187,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
     private readonly modelListCache = new Map<string, ModelListCacheEntry>();
     private readonly modelListInflight = new Map<string, ModelListInflightEntry>();
     private readonly runtimeContextCache = new Map<string, RuntimeContextCacheEntry>();
+    private readonly cachePrefixSnapshots = new Map<string, CachePrefixSnapshot>();
     private readonly chatRequestQueue: SerialRequestQueue;
     private readonly httpTransport = new OpenAIHttpTransport();
     private readonly serverTokenCounter = new ServerTokenCounter(
@@ -500,6 +514,125 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             count: tools.length,
             names: names.slice(0, 32),
             omittedNames: Math.max(0, names.length - 32),
+            fingerprint: this.shortHash(stableJsonStringify(tools)),
+        };
+    }
+
+    private shortHash(value: string): string {
+        return createHash("sha256").update(value).digest("hex").slice(0, 16);
+    }
+
+    private cachePrefixScope(
+        modelId: string,
+        options: ProvideLanguageModelChatResponseOptions
+    ): string | undefined {
+        const modelOptions = options.modelOptions as Record<string, unknown> | undefined;
+        const conversationId = typeof modelOptions?._copilotConversationId === "string"
+            ? modelOptions._copilotConversationId.trim()
+            : "";
+        const trace = modelOptions?._otelTraceContext;
+        const traceRecord = trace && typeof trace === "object"
+            ? trace as Record<string, unknown>
+            : undefined;
+        const traceId = typeof traceRecord?.traceId === "string" ? traceRecord.traceId : "";
+        const spanId = typeof traceRecord?.spanId === "string" ? traceRecord.spanId : "";
+        if (!conversationId && !traceId && !spanId) {
+            return undefined;
+        }
+        return [modelId, conversationId, traceId, spanId].join("\0");
+    }
+
+    private trackCachePrefix(
+        requestId: string,
+        modelId: string,
+        options: ProvideLanguageModelChatResponseOptions,
+        requestBody: Record<string, unknown>,
+        messages: readonly OpenAIChatMessage[]
+    ): Record<string, unknown> {
+        const scope = this.cachePrefixScope(modelId, options);
+        const staticFields = Object.fromEntries(
+            Object.entries(requestBody).filter(([key]) => key !== "messages" && key !== "tools")
+        );
+        const staticFieldsHash = this.shortHash(stableJsonStringify(staticFields));
+        const toolsHash = this.shortHash(stableJsonStringify(requestBody.tools ?? []));
+        const messageParts = messages.map(message => stableJsonStringify(message));
+        const messageChars = messageParts.reduce((total, part) => total + part.length, 0);
+        const systemHash = messages[0]?.role === "system"
+            ? this.shortHash(messageParts[0] ?? "")
+            : undefined;
+        const current: CachePrefixSnapshot = {
+            requestId,
+            staticFieldsHash,
+            toolsHash,
+            messageParts,
+            messageChars,
+        };
+
+        if (!scope) {
+            return {
+                scope: "unavailable",
+                staticFieldsHash,
+                toolsHash,
+                systemHash,
+                messageCount: messageParts.length,
+                messageChars,
+            };
+        }
+
+        const previous = this.cachePrefixSnapshots.get(scope);
+        this.cachePrefixSnapshots.delete(scope);
+        this.cachePrefixSnapshots.set(scope, current);
+        while (this.cachePrefixSnapshots.size > 32) {
+            const oldest = this.cachePrefixSnapshots.keys().next().value as string | undefined;
+            if (!oldest) {
+                break;
+            }
+            this.cachePrefixSnapshots.delete(oldest);
+        }
+
+        let identicalMessagePrefix = 0;
+        let sharedMessagePrefixChars = 0;
+        if (previous) {
+            const comparable = Math.min(previous.messageParts.length, messageParts.length);
+            while (
+                identicalMessagePrefix < comparable
+                && previous.messageParts[identicalMessagePrefix] === messageParts[identicalMessagePrefix]
+            ) {
+                sharedMessagePrefixChars += messageParts[identicalMessagePrefix].length;
+                identicalMessagePrefix += 1;
+            }
+            if (identicalMessagePrefix < comparable) {
+                const left = previous.messageParts[identicalMessagePrefix];
+                const right = messageParts[identicalMessagePrefix];
+                const partialLimit = Math.min(left.length, right.length);
+                let partialChars = 0;
+                while (partialChars < partialLimit && left.charCodeAt(partialChars) === right.charCodeAt(partialChars)) {
+                    partialChars += 1;
+                }
+                sharedMessagePrefixChars += partialChars;
+            }
+        }
+
+        const staticFieldsMatch = previous?.staticFieldsHash === staticFieldsHash;
+        const toolsMatch = previous?.toolsHash === toolsHash;
+        const reusableMessagePercent = previous && staticFieldsMatch && toolsMatch && previous.messageChars > 0
+            ? Number(((sharedMessagePrefixChars / previous.messageChars) * 100).toFixed(1))
+            : previous ? 0 : undefined;
+        return {
+            scope: this.shortHash(scope),
+            staticFieldsHash,
+            toolsHash,
+            systemHash,
+            messageCount: messageParts.length,
+            messageChars,
+            previousRequestId: previous?.requestId,
+            previousMessageCount: previous?.messageParts.length,
+            previousMessageChars: previous?.messageChars,
+            staticFieldsMatch,
+            toolsMatch,
+            identicalMessagePrefix,
+            sharedMessagePrefixChars,
+            reusableMessagePercent,
         };
     }
 
@@ -599,6 +732,15 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             4096,
             MAX_CONTEXT_LENGTH,
             DEFAULT_CONTEXT_LENGTH
+        );
+    }
+
+    private getConfiguredDeepSeekContextLength(): number {
+        return this.clampInt(
+            this.getConfig().get("deepSeekContextLength", DEFAULT_DEEPSEEK_CONTEXT_LIMIT),
+            32768,
+            DEEPSEEK_CONTEXT_LENGTH,
+            DEFAULT_DEEPSEEK_CONTEXT_LIMIT
         );
     }
 
@@ -1392,6 +1534,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             localServerUrl: this.getConfiguredLocalServerUrl(),
             localContextLength: this.getConfiguredLocalContextLength(),
             deepSeekEnabled: cfg.get<boolean>("enableDeepSeek", true) !== false,
+            deepSeekContextLength: this.getConfiguredDeepSeekContextLength(),
         });
     }
 
@@ -1420,7 +1563,7 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     : await this.getApiKey(),
                 familyOverride: this.isDeepSeekServer(legacyServerUrl) ? "deepseek" : undefined,
                 contextLengthOverride: this.isDeepSeekServer(legacyServerUrl)
-                    ? DEEPSEEK_CONTEXT_LENGTH
+                    ? this.getConfiguredDeepSeekContextLength()
                     : undefined,
             },
             modelId: parsed.modelId,
@@ -1447,6 +1590,9 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
         // The API itself decides whether to accept image content blocks;
         // if the model (e.g. DeepSeek) supports vision it may use tools
         // like view_image to inspect attached images.
+        // NOTE: DeepSeek API currently does NOT accept image_url content
+        // blocks (returns 400 Bad Request), so vision is disabled for
+        // DeepSeek models even if the model family supports it.
         const archMeta = model.meta as Record<string, unknown> | undefined;
         const inputModalities = (archMeta?.architecture as Record<string, unknown> | undefined)
             ?.input_modalities as string[] | undefined;
@@ -1582,7 +1728,39 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             }
         }));
 
-        return allEntries.sort((a, b) => a.name.localeCompare(b.name));
+        const sortedEntries = allEntries.sort((a, b) => a.name.localeCompare(b.name));
+        const localProfiles = sortedEntries
+            .map(entry => ({ entry, parsed: parseProviderModelId(entry.id) }))
+            .filter(({ parsed }) => parsed.sourceKey !== "deepseek" && !parsed.modelId.toLowerCase().includes("deepseek"))
+            .map(({ entry, parsed }) => ({
+                id: entry.id,
+                label: entry.name,
+                provider: "local" as const,
+                availability: "available" as const,
+                availabilityReason: "Model was discovered from the configured local endpoint",
+                availabilityCheckedAt: Date.now(),
+                useWhen: parsed.modelId.toLowerCase().includes("qwen")
+                    ? "Prefer for narrow, inexpensive, independently verifiable tasks"
+                    : "Use for focused local work when subscription budget should be preserved",
+            }));
+        const deepSeekProfiles = sortedEntries
+            .map(entry => ({ entry, parsed: parseProviderModelId(entry.id) }))
+            .filter(({ parsed }) => parsed.sourceKey === "deepseek" || parsed.modelId.toLowerCase().includes("deepseek"))
+            .map(({ entry }) => ({
+                id: entry.id,
+                label: entry.name,
+                provider: "deepseek" as const,
+                defaultEffort: "high",
+                availability: "available" as const,
+                availabilityReason: "Model was discovered from the configured DeepSeek endpoint",
+                availabilityCheckedAt: Date.now(),
+                useWhen: entry.id.toLowerCase().includes("v4")
+                    ? "Preferred DeepSeek V4 Pro profile for focused complex tasks"
+                    : "Use for focused complex tasks that need more reasoning than Qwen",
+            }));
+        setSubagentModelProfiles("local", localProfiles);
+        setSubagentModelProfiles("deepseek", deepSeekProfiles);
+        return sortedEntries;
     }
 
     /**
@@ -2207,6 +2385,13 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 toolResultMode: activeToolResultMode,
                 headers: this.redactHeaders(headers),
                 requestBody: this.summarizeRequestBodyForLog(requestBody),
+                cachePrefix: this.trackCachePrefix(
+                    requestId,
+                    requestModelId,
+                    options,
+                    requestBody,
+                    prepared.messages
+                ),
             });
 
             let response: Response;
@@ -2428,10 +2613,12 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             };
             let sourceMessages = convertForMode(activeToolResultMode);
             let finalAttempt: Extract<AttemptResult, { ok: true }> | undefined;
-            let finalServerUsage: ChatTokenUsage | undefined;
+            let accumulatedServerUsage: ChatTokenUsage | undefined;
+            let modelTurns = 0;
 
             while (true) {
                 const { attempt, usedMessages } = await runAttemptWithToolCompatibility(sourceMessages);
+                modelTurns += 1;
                 sourceMessages = usedMessages;
 
                 if (!attempt.response.body) {
@@ -2536,6 +2723,12 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                     continue;
                 }
 
+                if (roundServerUsage) {
+                    accumulatedServerUsage = accumulatedServerUsage
+                        ? mergeChatTokenUsage(accumulatedServerUsage, roundServerUsage)
+                        : roundServerUsage;
+                }
+
                 if (
                     roundOutputChars === 0 &&
                     roundToolCallParts === 0 &&
@@ -2624,7 +2817,6 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 }
 
                 finalAttempt = attempt;
-                finalServerUsage = roundServerUsage;
                 break;
             }
 
@@ -2640,11 +2832,11 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
             const queueWaitMs = chatSlot.waitMs;
             const estimatedPromptTokens = (latestContextUsage?.messageTokensAfterCompact ?? 0) +
                 (latestContextUsage?.toolTokens ?? 0);
-            const reportedUsage = finalServerUsage ?? estimateChatTokenUsage(
+            const reportedUsage = accumulatedServerUsage ?? estimateChatTokenUsage(
                 estimatedPromptTokens,
                 outputChars + thinkingChars
             );
-            const usageSource = finalServerUsage ? "server" : "estimate";
+            const usageSource = accumulatedServerUsage ? "server" : "estimate";
             const promptCacheUsage = calculatePromptCacheUsage(reportedUsage);
 
             progress.report(vscode.LanguageModelDataPart.text(JSON.stringify(reportedUsage), "usage"));
@@ -2666,10 +2858,13 @@ export class LlamaCppChatModelProvider extends BaseChatModelProvider {
                 outputChars,
                 thinkingChars,
                 estimatedOutputTokens,
+                outputTokens: reportedUsage.completion_tokens,
                 tokensPerSecond,
                 promptTokens: reportedUsage.prompt_tokens,
                 cachedPromptTokens: promptCacheUsage?.cachedTokens,
                 promptCacheHitPercent: promptCacheUsage?.hitPercent,
+                modelTurns,
+                usageEstimated: !accumulatedServerUsage,
                 retriedAfterOverflow: finalAttempt.retriedAfterOverflow,
                 toolCalls: emittedToolCallParts,
                 repairedToolCalls: reliabilityMetrics.repaired,

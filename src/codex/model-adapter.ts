@@ -34,6 +34,9 @@ export function createCodexReasoningConfigurationSchema(model: CodexModel): Code
 	const efforts = model.supportedReasoningEfforts.length > 0
 		? model.supportedReasoningEfforts
 		: [{ reasoningEffort: model.defaultReasoningEffort || "medium", description: "Model default reasoning" }];
+	const defaultEffort = efforts.some(option => option.reasoningEffort === "high")
+		? "high"
+		: model.defaultReasoningEffort || efforts[0].reasoningEffort;
 	return {
 		properties: {
 			reasoningEffort: {
@@ -45,7 +48,7 @@ export function createCodexReasoningConfigurationSchema(model: CodexModel): Code
 					return value.charAt(0).toUpperCase() + value.slice(1);
 				}),
 				enumDescriptions: efforts.map(option => option.description),
-				default: model.defaultReasoningEffort || efforts[0].reasoningEffort,
+				default: defaultEffort,
 				group: "navigation",
 			},
 		},
@@ -85,15 +88,16 @@ export function resolveCodexReasoningEffort(
 	model: CodexModel
 ): string {
 	const supported = new Set(model.supportedReasoningEfforts.map(option => option.reasoningEffort));
+	const highDefault = supported.has("high") ? "high" : model.defaultReasoningEffort;
 	const requested = typeof modelOption === "string" && modelOption.trim()
 		? modelOption.trim().toLowerCase()
 		: typeof configured === "string" && configured.trim().toLowerCase() !== "auto"
 			? configured.trim().toLowerCase()
-			: model.defaultReasoningEffort;
+			: highDefault;
 	if (supported.size === 0 || supported.has(requested)) {
 		return requested;
 	}
-	return model.defaultReasoningEffort || model.supportedReasoningEfforts[0]?.reasoningEffort || "medium";
+	return highDefault || model.supportedReasoningEfforts[0]?.reasoningEffort || "medium";
 }
 
 export function formatCodexRateLimit(snapshot: CodexRateLimitSnapshot | undefined): string {

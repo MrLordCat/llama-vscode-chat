@@ -262,7 +262,7 @@ export abstract class BaseChatModelProvider implements LanguageModelChatProvider
      * @returns Promise resolving to the estimated token count.
      */
     async provideTokenCount(
-        model: LanguageModelChatInformation,
+        _model: LanguageModelChatInformation,
         text: string | LanguageModelChatRequestMessage,
         _token: CancellationToken
     ): Promise<number> {

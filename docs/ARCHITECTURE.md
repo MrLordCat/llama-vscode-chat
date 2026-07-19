@@ -2,14 +2,18 @@
 
 ## Scope
 
-This extension exposes OpenAI-compatible local models and DeepSeek through one
-VS Code language model provider. Stable compatibility ids remain under the
-`llamacpp` namespace even though the product name is Local LLM Chat Provider.
+This extension exposes OpenAI-compatible local models, DeepSeek, Codex, and
+Claude subscriptions through one VS Code language model provider. Stable
+compatibility ids remain under the `llamacpp` namespace even though each source
+uses an independent transport and lifecycle.
 
 ## Runtime Components
 
 - `src/extension.ts` is the composition root. It creates services and registers
   the provider, commands, status items, UI providers, and memory tools.
+- `src/composite-provider.ts` combines the Local/DeepSeek, Codex, and Claude
+  catalogs and routes source-prefixed model ids without blocking one provider
+  on another provider's health probes.
 - `src/llama-provider.ts` coordinates model discovery, request attempts,
   compatibility retries, streaming, and metrics.
 - `src/base-provider.ts` owns provider-independent token estimation and SSE
@@ -18,6 +22,15 @@ VS Code language model provider. Stable compatibility ids remain under the
   payloads and validates tool-call history.
 - `src/logger.ts` writes structured JSONL diagnostics without message bodies or
   authorization headers.
+- `src/codex/` owns ChatGPT subscription discovery, `codex app-server` JSONL,
+  thread reuse, dynamic VS Code tools, and the fail-closed native tool bridge.
+- `src/claude/` owns Claude Code discovery, Agent SDK sessions, subscription
+  limits, warm conversation reuse, and an MCP allowlist limited to VS Code.
+- `src/provider-metrics.ts`, `src/token-usage-history.ts`, and
+  `src/usage-experiment.ts` normalize provider telemetry and persist bounded
+  comparison data without prompt bodies.
+- `src/subagent-guidance.ts` adds stable provider/model routing guidance to the
+  outer Copilot subagent tool without changing its execution boundary.
 - `src/memory/` owns durable shared memory, retrieval, prompt injection, and
   VS Code language model tools.
 - `src/tools/tool-call-reliability.ts` owns deterministic tool argument repair,
@@ -65,10 +78,12 @@ model provider surface. Update it explicitly with `npm run update-vscode-api`.
 
 ## Request Flow
 
-1. VS Code asks the provider for available models.
-2. The provider discovers primary, dedicated local, and DeepSeek sources and
-   returns source-prefixed model ids.
-3. For a chat turn, the model id selects the source and credentials.
+1. VS Code asks the composite provider for available models.
+2. Local/DeepSeek discovery, Codex app-server discovery, and Claude Agent SDK
+  discovery run independently; fulfilled catalogs are merged and sorted.
+3. For a chat turn, the source-prefixed model id selects exactly one provider.
+  Local and DeepSeek requests follow the OpenAI-compatible flow below; Codex
+  and Claude retain their own warm runtime state.
 4. A session-scoped native reasoning selection overrides the global mode when
    Copilot supplies it through `modelOptions`.
 5. Internal Copilot compaction prompts are classified before normal request
@@ -93,12 +108,36 @@ model provider surface. Update it explicitly with `npm run update-vscode-api`.
    context overflow, tool-role incompatibility, or empty output use separate
    bounded recovery paths.
 
+### Codex subscription flow
+
+1. A strict thread starts in read-only mode with built-in shell, file, web,
+  MCP, browser, plugin, hook, and subagent actions disabled.
+2. The current Copilot tool catalog is advertised as app-server dynamic tools.
+3. Tool calls are emitted as native VS Code cards and the app-server turn is
+  suspended until their results return.
+4. Calls arriving after a delegated boundary are queued and exposed in the
+  next native segment; only already visible calls require results on resume.
+5. Completed compatible threads reuse an exact conversation anchor and send
+  only incremental input. Runtime or catalog incompatibility fails closed.
+
+### Claude subscription flow
+
+1. The official Agent SDK starts with built-in tools, plugins, skills, and
+  external MCP configuration disabled.
+2. Copilot tools are hosted by one SDK MCP server; `canUseTool` allows only its
+  `mcp__vscode__*` names.
+3. Matching conversations reuse warm sessions. Native tool results resume the
+  suspended SDK query rather than constructing a second request history.
+4. Subscription and model-context probes refresh periodically; probes for
+  Claude availability never block Local, DeepSeek, or Codex requests.
+
 ## Persistent Data
 
 - API keys: VS Code `SecretStorage`.
 - Shared memory: `<globalStorage>/memory/shared-memory.json`.
 - Diagnostics: `<globalStorage>/logs/*.jsonl`.
 - Generated reports: `<globalStorage>/reports/*.{md,json}`.
+- Token usage and comparison experiments: bounded JSON under `<globalStorage>`.
 - User configuration: `llamacpp.*` VS Code settings.
 
 DeepSeek has a dedicated `llamacpp.deepSeekApiKey` secret. The generic primary
@@ -108,6 +147,9 @@ working.
 ## Invariants
 
 - Source prefixes are never sent as model ids to upstream servers.
+- Codex and Claude cannot execute actions outside native VS Code tool cards.
+- A detached Codex bridge may queue only calls belonging to an already pending
+  native tool turn; an unrelated detached call is rejected and logged.
 - DeepSeek-only fields and llama.cpp-only fields stay source-specific.
 - Memory and tool schemas count against the same request budget as messages.
 - Exact server counts include the active chat template and tool catalog; the
@@ -126,8 +168,7 @@ working.
 
 ## Remaining Boundaries
 
-The 1.0 refactor established source routing, context, request, transport, and UI
-modules with focused tests. The provider intentionally remains the lifecycle
-coordinator because streaming retries share turn-local state. Future extraction
-should happen only when it produces a smaller stable interface, especially for
-model discovery caches or the retry state machine.
+The OpenAI-compatible provider intentionally remains the largest lifecycle
+coordinator because streaming retries share turn-local state. Codex and Claude
+are isolated behind their runtime clients. Further extraction should be driven
+by a smaller stable interface or measured contention, not line count alone.

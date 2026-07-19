@@ -24,11 +24,13 @@ suite("model source routing", () => {
 			localServerUrl: "http://localhost:8000/",
 			localContextLength: 131072,
 			deepSeekEnabled: true,
+			deepSeekContextLength: 258400,
 		});
 
 		assert.deepStrictEqual(sources.map(source => source.key), ["primary", "local", "deepseek"]);
 		assert.strictEqual(sources[1].serverUrl, "http://localhost:8000");
 		assert.strictEqual(sources[1].contextLengthFallback, 131072);
+		assert.strictEqual(sources[2].contextLengthOverride, 258400);
 	});
 
 	test("does not advertise one URL twice", () => {
@@ -38,6 +40,7 @@ suite("model source routing", () => {
 			localServerUrl: "http://localhost:8000/",
 			localContextLength: 65536,
 			deepSeekEnabled: false,
+			deepSeekContextLength: 258400,
 		});
 
 		assert.strictEqual(sources.length, 1);

@@ -2,13 +2,13 @@
 	"name": "llama-vscode-chat",
 	"publisher": "mrlordcat",
 	"displayName": "Local LLM Chat Provider",
-	"description": "Use local OpenAI-compatible models, DeepSeek, and ChatGPT-backed Codex in VS Code Chat with tools, context control, and diagnostics.",
+	"description": "Use local models, DeepSeek, Codex, and Claude subscriptions in VS Code Chat with native tools, context control, and diagnostics.",
 	"icon": "assets/logo.png",
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/MrLordCat/llama-vscode-chat.git"
 	},
-	"version": "1.4.13",
+	"version": "1.5.28",
 	"engines": {
 		"vscode": "^1.104.0"
 	},
@@ -86,6 +86,13 @@
 					"default": true,
 					"description": "Also advertise DeepSeek models from https://api.deepseek.com when an API key is configured."
 				},
+				"llamacpp.deepSeekContextLength": {
+					"type": "number",
+					"default": 258400,
+					"minimum": 32768,
+					"maximum": 1048576,
+					"description": "Maximum context window advertised for DeepSeek models. This is independent of the local llama.cpp/Qwen server context."
+				},
 				"llamacpp.enableCodexSubscription": {
 					"type": "boolean",
 					"default": true,
@@ -117,11 +124,6 @@
 					"maximum": 100000,
 					"description": "Maximum characters retained from each historical VS Code tool result before Codex conversation serialization. Preserves more user and assistant history in long chats."
 				},
-				"llamacpp.codexUseVsCodeTools": {
-					"type": "boolean",
-					"default": true,
-					"description": "Let Codex select outer Copilot tools through dynamicTools, then delegate execution to the native Copilot tool loop for standard cards and session approval behavior."
-				},
 				"llamacpp.codexDeferNonCoreTools": {
 					"type": "boolean",
 					"default": true,
@@ -136,27 +138,28 @@
 				},
 				"llamacpp.codexReasoningEffort": {
 					"type": "string",
-					"enum": ["auto", "low", "medium", "high", "xhigh", "max", "ultra"],
+					"enum": [
+						"auto",
+						"low",
+						"medium",
+						"high",
+						"xhigh",
+						"max",
+						"ultra"
+					],
 					"default": "auto",
-					"description": "Default Codex reasoning effort. Auto uses each model's catalog default; the native per-chat Thinking Effort selector takes precedence."
+					"description": "Default Codex reasoning effort. Auto prefers High when the selected model supports it; the native per-chat Thinking Effort selector takes precedence."
 				},
 				"llamacpp.codexReasoningSummary": {
 					"type": "string",
-					"enum": ["auto", "concise", "detailed", "none"],
+					"enum": [
+						"auto",
+						"concise",
+						"detailed",
+						"none"
+					],
 					"default": "auto",
 					"description": "Reasoning summary detail streamed by Codex into the native thinking section when supported by VS Code."
-				},
-				"llamacpp.codexSandboxMode": {
-					"type": "string",
-					"enum": ["read-only", "workspace-write", "danger-full-access"],
-					"default": "workspace-write",
-					"description": "Sandbox used by the Codex runtime. Workspace-write allows project edits while protecting paths outside the workspace."
-				},
-				"llamacpp.codexApprovalPolicy": {
-					"type": "string",
-					"enum": ["untrusted", "on-request", "never"],
-					"default": "on-request",
-					"description": "Approval policy for Codex commands and permission escalation. On-request is the recommended default."
 				},
 				"llamacpp.codexFastServiceTier": {
 					"type": "boolean",
@@ -167,6 +170,50 @@
 					"type": "boolean",
 					"default": true,
 					"description": "Keep VS Code-backed Codex runtime threads ephemeral because Copilot Chat owns durable history. Active matching chats still reuse their in-memory thread for cache-efficient incremental turns."
+				},
+				"llamacpp.enableClaudeSubscription": {
+					"type": "boolean",
+					"default": true,
+					"description": "Advertise Claude subscription models through the official Claude Agent SDK. Built-in Claude Code tools are disabled; actions are delegated to native VS Code Chat tools."
+				},
+				"llamacpp.claudeContextLength": {
+					"type": "number",
+					"default": 258400,
+					"minimum": 32768,
+					"maximum": 2000000,
+					"description": "Maximum Claude context window advertised to VS Code. When the Agent SDK reports a larger raw model window, this value remains the effective cap."
+				},
+				"llamacpp.claudeMaxOutputTokens": {
+					"type": "number",
+					"default": 8192,
+					"minimum": 1024,
+					"maximum": 32768,
+					"description": "Maximum output tokens advertised for Claude models. Anthropic still applies per-model limits."
+				},
+				"llamacpp.claudeMaxInputChars": {
+					"type": "number",
+					"default": 300000,
+					"minimum": 32768,
+					"maximum": 900000,
+					"description": "Maximum serialized VS Code conversation characters used to initialize a new Claude session. Warm turns send only the latest user message."
+				},
+				"llamacpp.claudeReasoningEffort": {
+					"type": "string",
+					"enum": [
+						"auto",
+						"low",
+						"medium",
+						"high",
+						"xhigh",
+						"max"
+					],
+					"default": "auto",
+					"description": "Default Claude reasoning effort. The model picker exposes native per-chat Low/Medium/High choices, plus Extra High/Max on supported Opus and Fable models."
+				},
+				"llamacpp.claudeCliPath": {
+					"type": "string",
+					"default": "",
+					"description": "Absolute path to the Claude Code CLI binary. Leave empty to use the binary bundled with the official 'anthropic.claude-code' extension."
 				},
 				"llamacpp.contextLength": {
 					"type": "number",
@@ -570,7 +617,11 @@
 						},
 						"scope": {
 							"type": "string",
-							"enum": ["global", "workspace", "model"],
+							"enum": [
+								"global",
+								"workspace",
+								"model"
+							],
 							"description": "Where this memory applies. Workspace scopeId is filled automatically when omitted."
 						},
 						"scopeId": {
@@ -579,7 +630,14 @@
 						},
 						"kind": {
 							"type": "string",
-							"enum": ["preference", "decision", "environment", "workflow", "externalFact", "other"],
+							"enum": [
+								"preference",
+								"decision",
+								"environment",
+								"workflow",
+								"externalFact",
+								"other"
+							],
 							"description": "Semantic type. externalFact requires sourceUrl and verifiedAt."
 						},
 						"sourceUrl": {
@@ -637,7 +695,11 @@
 						},
 						"scope": {
 							"type": "string",
-							"enum": ["global", "workspace", "model"],
+							"enum": [
+								"global",
+								"workspace",
+								"model"
+							],
 							"description": "Optionally restrict results to one memory scope."
 						}
 					},
@@ -697,12 +759,12 @@
 				"title": "Local LLM: Configure DeepSeek"
 			},
 			{
-				"command": "llamacpp.toggleCodexSubscription",
-				"title": "Local LLM: Toggle Codex Subscription Source"
+				"command": "llamacpp.setDeepSeekContextLength",
+				"title": "Local LLM: Set DeepSeek Maximum Context"
 			},
 			{
-				"command": "llamacpp.toggleCodexVsCodeTools",
-				"title": "Local LLM: Toggle Codex VS Code Tools"
+				"command": "llamacpp.toggleCodexSubscription",
+				"title": "Local LLM: Toggle Codex Subscription Source"
 			},
 			{
 				"command": "llamacpp.toggleCodexDeferredTools",
@@ -719,6 +781,26 @@
 			{
 				"command": "llamacpp.codexShowStatus",
 				"title": "Local LLM: Show Codex Subscription Status"
+			},
+			{
+				"command": "llamacpp.toggleClaudeSubscription",
+				"title": "Local LLM: Toggle Claude Subscription Source"
+			},
+			{
+				"command": "llamacpp.claudeSignIn",
+				"title": "Local LLM: Sign In to Claude Subscription"
+			},
+			{
+				"command": "llamacpp.claudeSignOut",
+				"title": "Local LLM: Sign Out of Claude Subscription"
+			},
+			{
+				"command": "llamacpp.claudeShowStatus",
+				"title": "Local LLM: Show Claude Subscription Status"
+			},
+			{
+				"command": "llamacpp.setClaudeContextLength",
+				"title": "Local LLM: Set Claude Maximum Context"
 			},
 			{
 				"command": "llamacpp.setApiKey",
@@ -784,6 +866,30 @@
 				"title": "Local LLM: Reset Session Metrics"
 			},
 			{
+				"command": "llamacpp.clearTokenUsageHistory",
+				"title": "Local LLM: Clear Token Usage History"
+			},
+			{
+				"command": "llamacpp.startBaselineUsageExperiment",
+				"title": "Local LLM: Start Baseline Usage Experiment"
+			},
+			{
+				"command": "llamacpp.startDelegatedUsageExperiment",
+				"title": "Local LLM: Start Delegated Usage Experiment"
+			},
+			{
+				"command": "llamacpp.stopUsageExperiment",
+				"title": "Local LLM: Stop and Export Usage Experiment"
+			},
+			{
+				"command": "llamacpp.exportUsageExperiment",
+				"title": "Local LLM: Export Usage Experiment Report"
+			},
+			{
+				"command": "llamacpp.clearUsageExperiments",
+				"title": "Local LLM: Clear Usage Experiments"
+			},
+			{
 				"command": "llamacpp.openLatestLog",
 				"title": "Local LLM: Open Latest Log"
 			},
@@ -839,6 +945,7 @@
 		"compile": "tsc -p ./",
 		"lint": "eslint",
 		"check": "npm run lint && npm test",
+		"test:claude-native": "node ./scripts/claude-native-sdk-smoke.mjs",
 		"package": "vsce package",
 		"format": "prettier --write .",
 		"watch": "tsc -watch -p ./",
@@ -863,5 +970,8 @@
 		"diff": "8.0.3",
 		"serialize-javascript": "7.0.7"
 	},
-	"packageManager": "npm@10.9.8"
+	"packageManager": "npm@10.9.8",
+	"dependencies": {
+		"@anthropic-ai/claude-agent-sdk": "0.3.212"
+	}
 }

@@ -1,10 +1,10 @@
 # Local LLM Chat Provider for VS Code
 
-**One Copilot Chat workflow for Codex, DeepSeek, local LLMs, and planned Claude subscription support.**
+**One Copilot Chat workflow for local LLMs, DeepSeek, Codex, and Claude subscriptions.**
 
 Local LLM Chat Provider connects multiple model backends to the native VS Code
 model picker and Copilot Chat. Local models, remote OpenAI-compatible APIs,
-DeepSeek, and subscription-backed Codex models can coexist in one chat UI and
+DeepSeek, and subscription-backed Codex and Claude models can coexist in one chat UI and
 use the same agent tools, approvals, history, and diagnostics.
 
 The project started as a fork of a llama.cpp chat provider. It is now maintained
@@ -23,7 +23,7 @@ subscription sources:
   tools through the same visible tool cards and approval flow;
 - avoid redundant model turns and full-history resends;
 - maximize useful context and prompt-cache reuse;
-- provide one extensible integration point for Claude and future subscription providers.
+- provide one extensible integration point for future model and subscription providers.
 
 ## Model Sources
 
@@ -33,10 +33,10 @@ subscription sources:
 | Other OpenAI-compatible servers | Available | Configurable primary endpoint and API key |
 | DeepSeek | Available | Official API, separate credentials, reasoning support |
 | OpenAI Codex subscription | Available | Official local `codex app-server` and ChatGPT account |
-| Anthropic Claude subscription | Planned | Future adapter behind the same Copilot Chat flow |
+| Anthropic Claude subscription | Available | Official Claude Agent SDK and signed-in Claude Code runtime |
 
 All enabled sources appear together in the native model picker with labels such
-as `(Local)`, `(DeepSeek)`, and `(Codex)`. Internal source prefixes route each
+as `(Local)`, `(DeepSeek)`, `(Codex)`, and `(Claude)`. Internal source prefixes route each
 request to the correct transport and are never sent to the upstream model.
 
 ## Key Features
@@ -46,8 +46,8 @@ request to the correct transport and are never sent to the upstream model.
 - Multiple model sources remain enabled at the same time.
 - Model selection stays in the native Copilot Chat picker.
 - Local and API credentials are isolated in VS Code SecretStorage.
-- Codex authentication remains owned by the official Codex process; this
-  extension does not read or copy `~/.codex/auth.json`.
+- Subscription authentication remains owned by the official Codex and Claude
+  runtimes; this extension does not read or copy their credential files.
 
 ### Efficient Tools and Agent Execution
 
@@ -57,6 +57,10 @@ request to the correct transport and are never sent to the upstream model.
 - Large catalogs use deferred schema loading so uncommon tools do not occupy
   every prompt.
 - Parallel Codex tool calls are returned as one native batch.
+- Codex and Claude built-in action tools are disabled. Commands, edits, web
+  access, and every other action must return through native VS Code tool cards.
+- Late Codex tool calls that arrive between result rounds are queued for the
+  next native segment instead of failing during the bridge hand-off.
 - Tool names and arguments are repaired only when deterministic, validated
   against advertised schemas, and protected from repeated-call loops.
 
@@ -68,9 +72,14 @@ request to the correct transport and are never sent to the upstream model.
 - llama.cpp can use exact `/apply-template` and `/tokenize` prompt counts.
 - Stable prompt prefixes and late memory injection improve local/DeepSeek cache
   reuse.
+- Diagnostics distinguish cached tokens in the current prompt from retention
+  of the previous prompt prefix; a moderate current cache percentage can still
+  coexist with near-complete reuse of the preceding prefix.
 - Codex tool-result rounds continue the same app-server turn.
 - Completed Codex threads can be reused for ordinary follow-ups, sending only
   incremental input instead of the full Copilot conversation.
+- Claude conversations reuse warm Agent SDK sessions and resume native tool
+  results without rebuilding the complete session.
 
 ### Reasoning, Streaming, and Reliability
 
@@ -78,6 +87,8 @@ request to the correct transport and are never sent to the upstream model.
 - Local and DeepSeek request profiles keep provider-specific fields isolated.
 - Stream chunks are coalesced to reduce UI pressure during long answers.
 - Cancellation stops upstream generation and releases local server capacity.
+- Codex fails closed if its runtime attempts an internal shell, file, web,
+  MCP, browser, plugin, or subagent action outside the VS Code tool loop.
 - Transient failures, context overflow, incompatible tool-result roles, and
   empty output have separate bounded recovery paths.
 - Exact upstream usage is forwarded to Copilot Session Info when available.
@@ -87,8 +98,9 @@ request to the correct transport and are never sent to the upstream model.
 - Scoped shared memory supports typed entries, provenance, expiry, retrieval,
   automatic bounded injection, and native Agent tools.
 - Quick Access groups connections, model behavior, memory, and diagnostics.
-- Health checks, session-quality reports, context usage, cache hit rate,
-  throughput, and Codex thread reuse are visible without logging prompt bodies.
+- Health checks, session-quality reports, context usage, current-prompt cache
+  coverage, previous-prefix retention, throughput, and warm session/thread
+  reuse are visible without logging prompt bodies.
 - Optional JSONL diagnostics make routing and performance issues inspectable.
 
 ## Quick Start
@@ -126,6 +138,17 @@ API-key mode to avoid accidental API billing through this route. See
 [Codex Subscription](docs/CODEX_SUBSCRIPTION.md) for the full security and
 runtime model.
 
+### Claude Subscription
+
+1. Install the official Anthropic Claude Code VS Code extension or make the
+  Claude Code CLI available on `PATH`.
+2. Sign in through Claude Code, or run `Local LLM: Sign In to Claude Subscription`.
+3. Refresh models and select a model labelled `(Claude)`.
+
+Claude runs through the official Agent SDK. Built-in Claude Code tools and
+external MCP servers are excluded; only tools hosted by the native VS Code
+bridge are allowed.
+
 ## Optimized Copilot Integration
 
 The stable VS Code provider API does not expose every Copilot model control.
@@ -154,6 +177,7 @@ steps are in [Copilot Chat Integration](docs/COPILOT_PATCH.md).
 | `Local LLM: Set Local Server URL` | Configure the local endpoint |
 | `Local LLM: Configure DeepSeek` | Store the DeepSeek key and enable the source |
 | `Local LLM: Sign In to Codex Subscription` | Authenticate the Codex app-server |
+| `Local LLM: Sign In to Claude Subscription` | Authenticate the Claude Code runtime |
 | `Local LLM: Refresh Models` | Refresh every enabled source |
 | `Local LLM: Choose Chat Model` | Select a model in the native picker |
 | `Local LLM: Run Provider Health Check` | Probe configured sources and runtime features |
@@ -176,6 +200,7 @@ All settings live under `llamacpp.*`. Use the Quick Access sidebar or
 | [Shared Memory](docs/MEMORY.md) | Scopes, retrieval, persistence, and tools |
 | [Knowledge Verification](docs/KNOWLEDGE_VERIFICATION.md) | Source policy and cache-stable instructions |
 | [Reliability and Diagnostics](docs/RELIABILITY_DIAGNOSTICS.md) | Tool validation, health checks, and reports |
+| [Agent Tools Guide](docs/AGENT_TOOLS_GUIDE.md) | Compact CLI workflows for efficient agent sessions |
 | [Project Audit](docs/AUDIT.md) | Refactoring status, quality gates, and residual risks |
 
 ## Development
@@ -206,9 +231,9 @@ The independent extension id is `mrlordcat.llama-vscode-chat`. The
 `llamacpp` provider vendor and configuration namespace remain intentionally
 stable for existing installations.
 
-The VSIX owns model discovery, routing, prompts, tools, memory, streaming,
-context handling, and diagnostics. Official provider runtimes continue to own
-their authentication and subscription limits.
+The VSIX owns model discovery, routing, prompts, native tool delegation,
+memory, streaming, context handling, and diagnostics. Official provider
+runtimes continue to own their authentication and subscription limits.
 
 ## License
 

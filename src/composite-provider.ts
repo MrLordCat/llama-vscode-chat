@@ -1,6 +1,8 @@
 import * as vscode from "vscode";
 
-import { CODEX_MODEL_ID_PREFIX, decodeCodexModelId } from "./codex/model-adapter";
+import { decodeCodexModelId } from "./codex/model-adapter";
+import type { ClaudeChatModelProvider } from "./claude/claude-provider";
+import { decodeClaudeModelId } from "./claude/message-adapter";
 
 /** Combines independent transports under the existing picker-compatible vendor. */
 export class CompositeChatModelProvider implements vscode.LanguageModelChatProvider, vscode.Disposable {
@@ -10,11 +12,13 @@ export class CompositeChatModelProvider implements vscode.LanguageModelChatProvi
 
 	constructor(
 		private readonly defaultProvider: vscode.LanguageModelChatProvider,
-		private readonly codexProvider: vscode.LanguageModelChatProvider
+		private readonly codexProvider: vscode.LanguageModelChatProvider,
+		private readonly claudeProvider?: ClaudeChatModelProvider
 	) {
 		this.subscriptions = [
 			defaultProvider.onDidChangeLanguageModelChatInformation?.(() => this.modelChanges.fire()),
 			codexProvider.onDidChangeLanguageModelChatInformation?.(() => this.modelChanges.fire()),
+			claudeProvider?.onDidChangeLanguageModelChatInformation?.(() => this.modelChanges.fire()),
 		].filter((value): value is vscode.Disposable => value !== undefined);
 	}
 
@@ -22,23 +26,36 @@ export class CompositeChatModelProvider implements vscode.LanguageModelChatProvi
 		options: { silent: boolean },
 		token: vscode.CancellationToken
 	): Promise<vscode.LanguageModelChatInformation[]> {
-		const [defaultResult, codexResult] = await Promise.allSettled([
+		const results = await Promise.allSettled([
 			this.defaultProvider.provideLanguageModelChatInformation(options, token),
 			this.codexProvider.provideLanguageModelChatInformation(options, token),
+			...(this.claudeProvider
+				? [this.claudeProvider.provideLanguageModelChatInformation(options, token)]
+				: []),
 		]);
-		const defaults = defaultResult.status === "fulfilled" ? await defaultResult.value ?? [] : [];
-		const codex = codexResult.status === "fulfilled" ? await codexResult.value ?? [] : [];
-		return [...defaults, ...codex].sort((left, right) => left.name.localeCompare(right.name));
+		const all: vscode.LanguageModelChatInformation[] = [];
+		for (const result of results) {
+			if (result.status === "fulfilled") {
+				all.push(...(await result.value ?? []));
+			}
+		}
+		return all.sort((left, right) => left.name.localeCompare(right.name));
 	}
 
-	provideLanguageModelChatResponse(
+	async provideLanguageModelChatResponse(
 		model: vscode.LanguageModelChatInformation,
 		messages: readonly vscode.LanguageModelChatRequestMessage[],
 		options: vscode.ProvideLanguageModelChatResponseOptions,
 		progress: vscode.Progress<vscode.LanguageModelResponsePart>,
 		token: vscode.CancellationToken
-	): Thenable<void> {
-		return this.selectProvider(model.id).provideLanguageModelChatResponse(
+	): Promise<void> {
+		const provider = this.selectProvider(model.id);
+		if (this.claudeProvider && provider !== this.claudeProvider && !token.isCancellationRequested) {
+			void this.claudeProvider.refreshSubscriptionUsage().catch(() => {
+				// Keep other providers independent; Claude remains UNKNOWN until a live probe succeeds.
+			});
+		}
+		await provider.provideLanguageModelChatResponse(
 			model,
 			messages,
 			options,
@@ -63,8 +80,12 @@ export class CompositeChatModelProvider implements vscode.LanguageModelChatProvi
 	}
 
 	private selectProvider(modelId: string): vscode.LanguageModelChatProvider {
-		return decodeCodexModelId(modelId) !== undefined || modelId.startsWith(CODEX_MODEL_ID_PREFIX)
-			? this.codexProvider
-			: this.defaultProvider;
+		if (decodeCodexModelId(modelId) !== undefined) {
+			return this.codexProvider;
+		}
+		if (this.claudeProvider && decodeClaudeModelId(modelId) !== undefined) {
+			return this.claudeProvider;
+		}
+		return this.defaultProvider;
 	}
 }

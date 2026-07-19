@@ -1,11 +1,11 @@
-# Project Audit - Version 1.0.0
+# Project Audit - Version 1.5.28
 
 ## Result
 
-The rapid-prototype codebase has been converted into an independently owned,
-tested extension with explicit boundaries for local llama.cpp and DeepSeek.
-Version 1.0.0 is the first release where repository metadata, runtime behavior,
-documentation, build tooling, and local installation all belong to this fork.
+The repository has explicit provider boundaries for local/OpenAI-compatible
+models, DeepSeek, Codex, and Claude. The 1.5.28 audit focused on native tool
+delegation correctness, dead code, cross-provider latency, current docs, and
+release reproducibility.
 
 ## Completed Work
 
@@ -20,8 +20,12 @@ documentation, build tooling, and local installation all belong to this fork.
   native context metrics, and the optional guarded Copilot Chat patch.
 - Added serial local request admission, bounded compatibility retries, stream
   coalescing, tool-result protection, and structured privacy-conscious logs.
+- Added ChatGPT-backed Codex app-server threads and Claude Agent SDK sessions
+  while forcing both runtimes to execute actions through native VS Code tools.
+- Added persistent token usage and matched baseline/delegated experiments for
+  comparing provider and subagent costs without storing prompt contents.
 
-## 1.0 Refactoring
+## Architecture And Cleanup
 
 - `src/model-sources/` now owns source construction, URL deduplication, model
   ids, and family routing.
@@ -36,6 +40,11 @@ documentation, build tooling, and local installation all belong to this fork.
 
 The refactor removed duplicate in-class implementations and reduced the two
 largest change hotspots while retaining focused compatibility tests.
+
+The 1.5.28 pass additionally removed an unused metrics formatter, an unused
+Claude session catalog field, a retained constructor property, redundant model
+prefix checks, and a stale lock-file backup. TypeScript's unused-local and
+unused-parameter checks now pass for the complete project.
 
 ## Token And Cache Findings
 
@@ -57,13 +66,30 @@ The audit found and corrected four material efficiency problems:
 
 Both llama.cpp `prompt_tokens_details.cached_tokens` and DeepSeek
 `prompt_cache_hit_tokens` are normalized, logged, and displayed in Diagnostics.
+Current-prompt cache coverage is reported separately from preservation of the
+previous prompt prefix, preventing a growing prompt from looking like a cache
+regression when the old prefix is still almost completely retained.
+
+## Native Tool Delegation Finding
+
+The message `Native VS Code tool delegation is unavailable` came from a bridge
+race, not a missing VS Code tool catalog. A second Codex tool call could arrive
+after the first delegated boundary detached its progress reporter but before
+Copilot resumed the turn with the first result. The bridge now queues that late
+call, reports it in the next native segment, and validates results only for
+calls already visible to VS Code. Unrelated detached calls still fail closed.
+
+The audit also removed a synchronous Claude subscription probe from every
+Local, DeepSeek, and Codex request. Claude continues to perform its own live
+availability preflight, while background refresh cannot delay another source.
 
 ## Quality Gates
 
 - TypeScript strict compilation.
 - ESLint with no current findings.
-- 91 VS Code extension-host tests covering routing, context, requests,
-  transport, queues, streaming, usage, tools, memory, and UI structure.
+- 223 VS Code extension-host tests covering routing, context, requests,
+  transport, queues, streaming, usage, tools, subscriptions, memory, and UI.
+- TypeScript compilation with `noUnusedLocals` and `noUnusedParameters`.
 - `npm audit` reports no known dependency vulnerabilities after controlled
   test-tool overrides.
 - CI runs install, lint, extension-host tests, and VSIX packaging.
@@ -87,6 +113,6 @@ Both llama.cpp `prompt_tokens_details.cached_tokens` and DeepSeek
 
 ## Release Decision
 
-The repository is ready for version 1.0.0. Remaining items are future product
-improvements rather than unfinished cleanup required for a reliable local and
-DeepSeek provider.
+The repository is ready for version 1.5.28 after packaging and installation of
+the validated VSIX. Remaining items are future product improvements rather than
+unfinished cleanup required for this release.

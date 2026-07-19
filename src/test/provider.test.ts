@@ -1391,6 +1391,31 @@ suite("Llama.cpp Chat Provider Extension", () => {
     });
 
     suite("utils/tools", () => {
+		test("convertMessages canonicalizes tool arguments and missing call ids", () => {
+			const firstInput: Record<string, unknown> = {};
+			firstInput.z = 1;
+			firstInput.a = { y: 2, b: 3 };
+			const secondInput: Record<string, unknown> = {};
+			secondInput.a = { b: 3, y: 2 };
+			secondInput.z = 1;
+			const first = convertMessages([{
+				role: vscode.LanguageModelChatMessageRole.Assistant,
+				content: [new vscode.LanguageModelToolCallPart("", "stable_tool", firstInput)],
+				name: undefined,
+			}]);
+			const second = convertMessages([{
+				role: vscode.LanguageModelChatMessageRole.Assistant,
+				content: [new vscode.LanguageModelToolCallPart("", "stable_tool", secondInput)],
+				name: undefined,
+			}]);
+
+			assert.strictEqual(first[0].tool_calls?.[0].id, second[0].tool_calls?.[0].id);
+			assert.strictEqual(
+				first[0].tool_calls?.[0].function.arguments,
+				'{"a":{"b":3,"y":2},"z":1}'
+			);
+		});
+
         test("convertTools returns function tool definitions", () => {
 			const out = convertTools({
 				tools: [
@@ -1610,6 +1635,35 @@ suite("Llama.cpp Chat Provider Extension", () => {
 			assert.ok(byName.get("fetch_webpage")?.includes("official documentation"));
 			assert.ok(byName.get("github_repo")?.includes("pinned tag or commit"));
 			assert.ok(byName.get("github_text_search")?.includes("authoritative"));
+		});
+
+		test("convertTools canonicalizes tool and schema order", () => {
+			const alpha = {
+				name: "alpha_tool",
+				description: "Alpha",
+				inputSchema: { type: "object", properties: { z: { type: "string" }, a: { type: "number" } } },
+			};
+			const beta = {
+				name: "beta_tool",
+				description: "Beta",
+				inputSchema: { properties: { a: { type: "number" }, z: { type: "string" } }, type: "object" },
+			};
+			const forward = convertTools({
+				toolMode: vscode.LanguageModelChatToolMode.Auto,
+				tools: [beta, alpha],
+			} satisfies vscode.ProvideLanguageModelChatResponseOptions);
+			const reverse = convertTools({
+				toolMode: vscode.LanguageModelChatToolMode.Auto,
+				tools: [alpha, beta],
+			} satisfies vscode.ProvideLanguageModelChatResponseOptions);
+
+			assert.deepStrictEqual(forward, reverse);
+			const firstParameters = forward.tools?.[0].function.parameters as Record<string, unknown> | undefined;
+			const firstProperties = firstParameters?.properties as Record<string, unknown> | undefined;
+			assert.deepStrictEqual(
+				Object.keys(firstProperties ?? {}),
+				["a", "z"]
+			);
 		});
 
         test("convertTools apiDirect include-all respects max tools cap", () => {

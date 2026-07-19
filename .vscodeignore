@@ -20,6 +20,13 @@ eslint.config.mjs
 **/*.map
 **/*.ts
 *.log
+*.bak
+nul
 logs/**
 *.vsix
 qwen_promt_reslut.md
+node_modules/@anthropic-ai/claude-agent-sdk-*/**
+node_modules/@anthropic-ai/claude-agent-sdk/browser-sdk.*
+node_modules/@anthropic-ai/claude-agent-sdk/bridge.*
+node_modules/@anthropic-ai/claude-agent-sdk/*.d.ts
+node_modules/@anthropic-ai/claude-agent-sdk/manifest*

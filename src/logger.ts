@@ -32,7 +32,7 @@ export class LlamaLogService implements vscode.Disposable, LlamaLogSink {
 	private writeQueue: Promise<void> = Promise.resolve();
 	private disposed = false;
 
-	constructor(private readonly context: vscode.ExtensionContext) {
+	constructor(context: vscode.ExtensionContext) {
 		this.logDirPath = path.join(context.globalStorageUri.fsPath, "logs");
 	}
 

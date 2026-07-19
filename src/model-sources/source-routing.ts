@@ -1,5 +1,4 @@
 import {
-	DEEPSEEK_CONTEXT_LENGTH,
 	DEEPSEEK_SERVER_URL,
 	DEFAULT_SERVER_URL,
 } from "../constants";
@@ -40,6 +39,7 @@ export interface ModelSourceConfiguration {
 	localServerUrl: string;
 	localContextLength: number;
 	deepSeekEnabled: boolean;
+	deepSeekContextLength: number;
 }
 
 export function normalizeServerUrl(serverUrl: string): string {
@@ -111,7 +111,7 @@ export function createModelSources(configuration: ModelSourceConfiguration): Cha
 		serverUrl: configuration.primaryServerUrl,
 		apiKey: primaryIsDeepSeek ? configuration.deepSeekApiKey : configuration.primaryApiKey,
 		familyOverride: primaryIsDeepSeek ? "deepseek" : undefined,
-		contextLengthOverride: primaryIsDeepSeek ? DEEPSEEK_CONTEXT_LENGTH : undefined,
+		contextLengthOverride: primaryIsDeepSeek ? configuration.deepSeekContextLength : undefined,
 	});
 
 	if (configuration.localEnabled) {
@@ -131,7 +131,7 @@ export function createModelSources(configuration: ModelSourceConfiguration): Cha
 			serverUrl: DEEPSEEK_SERVER_URL,
 			apiKey: configuration.deepSeekApiKey,
 			familyOverride: "deepseek",
-			contextLengthOverride: DEEPSEEK_CONTEXT_LENGTH,
+			contextLengthOverride: configuration.deepSeekContextLength,
 		});
 	}
 

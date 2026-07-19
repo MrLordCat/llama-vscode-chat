@@ -1,13 +1,19 @@
 import * as assert from "assert";
 import * as vscode from "vscode";
 
+import type { ClaudeChatModelProvider } from "../claude/claude-provider";
 import { CodexAppServerClient, JsonLineBuffer, type CodexServerNotification } from "../codex/app-server-client";
 import { CompositeChatModelProvider } from "../composite-provider";
 import {
 	canResumeCodexToolTurn,
 	CodexChatModelProvider,
 	createCodexRuntimeFingerprints,
+	createCodexVsCodeOnlyPolicy,
+	diffCodexThreadUsage,
 	intersectCodexThreadTools,
+	mapCodexTokenUsageMetrics,
+	shouldRecoverCodexFailedToolTurn,
+	shouldRecoverCodexToolTurnException,
 } from "../codex/codex-provider";
 import {
 	buildCodexDynamicTools,
@@ -30,7 +36,12 @@ import {
 	resolveCodexReasoningEffort,
 } from "../codex/model-adapter";
 import type { CodexModel } from "../codex/protocol";
-import { CodexTurnBridge } from "../codex/turn-bridge";
+import {
+	CodexInternalToolBlockedError,
+	CodexStaleTurnError,
+	CodexTurnBridge,
+	isCodexInternalActionItem,
+} from "../codex/turn-bridge";
 
 const model: CodexModel = {
 	id: "gpt-test",
@@ -92,13 +103,63 @@ suite("Codex subscription provider", () => {
 
 		const schema = createCodexReasoningConfigurationSchema(model);
 		assert.deepStrictEqual(schema.properties.reasoningEffort.enum, ["low", "high"]);
-		assert.strictEqual(schema.properties.reasoningEffort.default, "low");
+		assert.strictEqual(schema.properties.reasoningEffort.default, "high");
 	});
 
 	test("uses native effort when supported and falls back to catalog default", () => {
 		assert.strictEqual(resolveCodexReasoningEffort("auto", "high", model), "high");
 		assert.strictEqual(resolveCodexReasoningEffort("high", undefined, model), "high");
-		assert.strictEqual(resolveCodexReasoningEffort("ultra", undefined, model), "low");
+		assert.strictEqual(resolveCodexReasoningEffort("auto", undefined, model), "high");
+		assert.strictEqual(resolveCodexReasoningEffort("ultra", undefined, model), "high");
+	});
+
+	test("forces Codex actions through the native VS Code tool boundary", () => {
+		const policy = createCodexVsCodeOnlyPolicy();
+		assert.strictEqual(policy.approvalPolicy, "on-request");
+		assert.strictEqual(policy.sandbox, "read-only");
+		assert.deepStrictEqual(policy.environments, []);
+		assert.strictEqual(policy.config.web_search, "disabled");
+		assert.deepStrictEqual(policy.config.mcp_servers, {});
+		assert.strictEqual(policy.config.tools.web_search, false);
+		for (const feature of [
+			"apps",
+			"browser_use",
+			"computer_use",
+			"hooks",
+			"image_generation",
+			"multi_agent",
+			"plugins",
+			"shell_tool",
+			"unified_exec",
+		]) {
+			assert.strictEqual(policy.config.features[feature], false, `${feature} must be disabled`);
+		}
+	});
+
+	test("counts completed Codex thread usage by cumulative delta", () => {
+		const first = {
+			total: { totalTokens: 1_300, inputTokens: 1_000, cachedInputTokens: 800, outputTokens: 300, reasoningOutputTokens: 100 },
+			last: { totalTokens: 1_300, inputTokens: 1_000, cachedInputTokens: 800, outputTokens: 300, reasoningOutputTokens: 100 },
+			modelContextWindow: 258_400,
+		};
+		const next = {
+			total: { totalTokens: 2_000, inputTokens: 1_550, cachedInputTokens: 1_200, outputTokens: 450, reasoningOutputTokens: 150 },
+			last: { totalTokens: 700, inputTokens: 550, cachedInputTokens: 400, outputTokens: 150, reasoningOutputTokens: 50 },
+			modelContextWindow: 258_400,
+		};
+		assert.deepStrictEqual(diffCodexThreadUsage(first), {
+			inputTokens: 1_000,
+			outputTokens: 300,
+			cachedInputTokens: 800,
+			reasoningOutputTokens: 100,
+		});
+		assert.deepStrictEqual(diffCodexThreadUsage(next, first), {
+			inputTokens: 550,
+			outputTokens: 150,
+			cachedInputTokens: 400,
+			reasoningOutputTokens: 50,
+		});
+		assert.strictEqual(diffCodexThreadUsage(next, next), undefined);
 	});
 
 	test("serializes VS Code text and tool history as conversation data", () => {
@@ -227,7 +288,16 @@ suite("Codex subscription provider", () => {
 				return {};
 			},
 		} as unknown as CodexAppServerClient;
-		const bridge = new CodexTurnBridge(fakeClient, "thread-1");
+		const usageSnapshots: number[] = [];
+		const outputEstimates: number[] = [];
+		const bridge = new CodexTurnBridge(
+			fakeClient,
+			"thread-1",
+			undefined,
+			undefined,
+			(_bridge, usage) => usageSnapshots.push(usage.last.totalTokens),
+			(_bridge, tokens) => outputEstimates.push(tokens)
+		);
 		const firstParts: vscode.LanguageModelResponsePart[] = [];
 		const secondParts: vscode.LanguageModelResponsePart[] = [];
 		const tokenSource = new vscode.CancellationTokenSource();
@@ -239,6 +309,18 @@ suite("Codex subscription provider", () => {
 		notifications.fire({
 			method: "item/agentMessage/delta",
 			params: { threadId: "thread-1", turnId: "turn-1", itemId: "preface", delta: "pre" },
+		});
+		notifications.fire({
+			method: "thread/tokenUsage/updated",
+			params: {
+				threadId: "thread-1",
+				turnId: "turn-1",
+				tokenUsage: {
+					total: { totalTokens: 12_000, inputTokens: 11_000, cachedInputTokens: 10_000, outputTokens: 1_000, reasoningOutputTokens: 100 },
+					last: { totalTokens: 1_200, inputTokens: 1_100, cachedInputTokens: 1_000, outputTokens: 100, reasoningOutputTokens: 10 },
+					modelContextWindow: 258_400,
+				},
+			},
 		});
 		const dynamicResponsePromise = bridge.delegate({
 			callId: "call-1",
@@ -266,6 +348,355 @@ suite("Codex subscription provider", () => {
 		assert.ok(secondParts.some(part => part instanceof vscode.LanguageModelTextPart));
 		assert.strictEqual(bridge.finalText, "predone");
 		assert.strictEqual(bridge.segmentText, "done");
+		assert.deepStrictEqual(usageSnapshots, [1_200]);
+		assert.ok(outputEstimates.length >= 2);
+		assert.strictEqual(outputEstimates.at(-1), 1);
+		bridge.dispose();
+		tokenSource.dispose();
+		notifications.dispose();
+		stops.dispose();
+	});
+
+	test("interrupts a strict turn when Codex starts an internal action", async () => {
+		const notifications = new vscode.EventEmitter<CodexServerNotification>();
+		const stops = new vscode.EventEmitter<Error>();
+		const requests: string[] = [];
+		const fakeClient = {
+			onNotification: notifications.event,
+			onDidStop: stops.event,
+			request: async (method: string) => {
+				requests.push(method);
+				return method === "turn/start"
+					? { turn: { id: "turn-strict", status: "inProgress" } }
+					: {};
+			},
+		} as unknown as CodexAppServerClient;
+		const bridge = new CodexTurnBridge(
+			fakeClient,
+			"thread-strict",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			false,
+			true
+		);
+		const tokenSource = new vscode.CancellationTokenSource();
+		const boundary = bridge.start(
+			{ threadId: "thread-strict", input: [] },
+			{ report: () => undefined },
+			tokenSource.token
+		);
+		await new Promise<void>(resolve => setImmediate(resolve));
+		notifications.fire({
+			method: "item/started",
+			params: {
+				threadId: "thread-strict",
+				turnId: "turn-strict",
+				item: { id: "internal-command", type: "commandExecution", command: "echo bypass" },
+			},
+		});
+		await assert.rejects(boundary, CodexInternalToolBlockedError);
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.ok(requests.includes("turn/interrupt"));
+		assert.strictEqual(isCodexInternalActionItem({ type: "fileChange" }), true);
+		assert.strictEqual(isCodexInternalActionItem({ type: "agentMessage" }), false);
+		bridge.dispose();
+		tokenSource.dispose();
+		notifications.dispose();
+		stops.dispose();
+	});
+
+	test("restarts a failed tool turn on the same Codex thread", async () => {
+		const notifications = new vscode.EventEmitter<CodexServerNotification>();
+		const stops = new vscode.EventEmitter<Error>();
+		const turnStartParams: Record<string, unknown>[] = [];
+		const fakeClient = {
+			onNotification: notifications.event,
+			onDidStop: stops.event,
+			request: async (method: string, params: Record<string, unknown>) => {
+				if (method === "turn/start") {
+					turnStartParams.push(params);
+					return { turn: { id: `turn-${turnStartParams.length}`, status: "inProgress" } };
+				}
+				return {};
+			},
+		} as unknown as CodexAppServerClient;
+		const bridge = new CodexTurnBridge(fakeClient, "thread-recovery");
+		const tokenSource = new vscode.CancellationTokenSource();
+		const first = bridge.start(
+			{ threadId: "thread-recovery", input: [{ type: "text", text: "large original input" }] },
+			{ report: () => undefined },
+			tokenSource.token
+		);
+		await new Promise<void>(resolve => setImmediate(resolve));
+		notifications.fire({
+			method: "turn/completed",
+			params: { threadId: "thread-recovery", turn: { id: "turn-1", status: "failed", error: null } },
+		});
+		const failed = await first;
+		assert.strictEqual(failed.kind, "completed");
+
+		const recovered = bridge.restart(
+			{ threadId: "thread-recovery", input: [{ type: "text", text: "continue" }] },
+			{ report: () => undefined },
+			tokenSource.token
+		);
+		await new Promise<void>(resolve => setImmediate(resolve));
+		// A duplicate terminal event from the old turn must not complete the recovery turn.
+		notifications.fire({
+			method: "turn/completed",
+			params: { threadId: "thread-recovery", turn: { id: "turn-1", status: "failed", error: null } },
+		});
+		notifications.fire({
+			method: "turn/completed",
+			params: { threadId: "thread-recovery", turn: { id: "turn-2", status: "completed", error: null } },
+		});
+		const boundary = await recovered;
+		assert.strictEqual(boundary.kind, "completed");
+		if (boundary.kind === "completed") {
+			assert.strictEqual(boundary.completed.turn.id, "turn-2");
+		}
+		assert.strictEqual(turnStartParams.length, 2);
+		assert.strictEqual(turnStartParams[1].threadId, "thread-recovery");
+		assert.strictEqual(JSON.stringify(turnStartParams[1]).includes("large original input"), false);
+		bridge.dispose();
+		tokenSource.dispose();
+		notifications.dispose();
+		stops.dispose();
+	});
+
+	test("recovers only transient Codex tool-turn failures", () => {
+		assert.strictEqual(shouldRecoverCodexFailedToolTurn(), true);
+		assert.strictEqual(shouldRecoverCodexFailedToolTurn("Internal server error"), true);
+		assert.strictEqual(shouldRecoverCodexFailedToolTurn("Input exceeds the maximum length"), false);
+		assert.strictEqual(shouldRecoverCodexFailedToolTurn("Rate limit exceeded"), false);
+		assert.strictEqual(shouldRecoverCodexFailedToolTurn("Request was interrupted"), false);
+		assert.strictEqual(shouldRecoverCodexToolTurnException(new CodexStaleTurnError("stale")), true);
+		assert.strictEqual(shouldRecoverCodexToolTurnException(new Error("transport failed")), false);
+	});
+
+	test("recovers a completed turn when app-server omits turn/completed after a subagent result", async () => {
+		const notifications = new vscode.EventEmitter<CodexServerNotification>();
+		const stops = new vscode.EventEmitter<Error>();
+		let threadReads = 0;
+		const fakeClient = {
+			onNotification: notifications.event,
+			onDidStop: stops.event,
+			request: async (method: string) => {
+				if (method === "turn/start") {
+					return { turn: { id: "turn-subagent", status: "inProgress" } };
+				}
+				if (method === "thread/read") {
+					threadReads++;
+					return {
+						thread: {
+							id: "thread-subagent",
+							turns: [{
+								id: "turn-subagent",
+								status: "completed",
+								error: null,
+								items: [{
+									type: "agentMessage",
+									id: "final-after-subagent",
+									phase: "final_answer",
+									text: "Recovered after subagent",
+								}],
+							}],
+						},
+					};
+				}
+				return {};
+			},
+		} as unknown as CodexAppServerClient;
+		const bridge = new CodexTurnBridge(fakeClient, "thread-subagent");
+		const tokenSource = new vscode.CancellationTokenSource();
+		const first = bridge.start(
+			{ threadId: "thread-subagent", input: [] },
+			{ report: () => undefined },
+			tokenSource.token
+		);
+		const subagentResponse = bridge.delegate({
+			callId: "subagent-call",
+			tool: "runSubagent",
+			input: { description: "inspect" },
+		});
+		assert.strictEqual((await first).kind, "delegated");
+
+		const parts: vscode.LanguageModelResponsePart[] = [];
+		const resumed = bridge.resume(new Map([["subagent-call", {
+			contentItems: [{ type: "inputText", text: "child_session_ref: done" }],
+			success: true,
+		}]]), { report: part => parts.push(part) }, tokenSource.token);
+		assert.strictEqual((await subagentResponse).success, true);
+		const boundary = await resumed;
+		assert.strictEqual(boundary.kind, "completed");
+		assert.strictEqual(threadReads, 1);
+		assert.ok(parts.some(part =>
+			part instanceof vscode.LanguageModelTextPart
+			&& part.value === "Recovered after subagent"
+		));
+		assert.strictEqual(bridge.segmentText, "Recovered after subagent");
+		bridge.dispose();
+		tokenSource.dispose();
+		notifications.dispose();
+		stops.dispose();
+	});
+
+	test("reconciles ephemeral turns from thread status without requesting stored turns", async () => {
+		const notifications = new vscode.EventEmitter<CodexServerNotification>();
+		const stops = new vscode.EventEmitter<Error>();
+		const threadReadParams: Record<string, unknown>[] = [];
+		let markFirstRead!: () => void;
+		const firstRead = new Promise<void>(resolve => { markFirstRead = resolve; });
+		const fakeClient = {
+			onNotification: notifications.event,
+			onDidStop: stops.event,
+			request: async (method: string, params: Record<string, unknown>) => {
+				if (method === "turn/start") {
+					return { turn: { id: "turn-ephemeral", status: "inProgress" } };
+				}
+				if (method === "thread/read") {
+					threadReadParams.push(params);
+					markFirstRead();
+					return {
+						thread: {
+							id: "thread-ephemeral",
+							ephemeral: true,
+							status: { type: "idle" },
+						},
+					};
+				}
+				return {};
+			},
+		} as unknown as CodexAppServerClient;
+		const bridge = new CodexTurnBridge(
+			fakeClient,
+			"thread-ephemeral",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			true
+		);
+		const tokenSource = new vscode.CancellationTokenSource();
+		const first = bridge.start(
+			{ threadId: "thread-ephemeral", input: [] },
+			{ report: () => undefined },
+			tokenSource.token
+		);
+		bridge.delegate({ callId: "call-ephemeral", tool: "read_file", input: {} });
+		assert.strictEqual((await first).kind, "delegated");
+		const resumed = bridge.resume(new Map([["call-ephemeral", {
+			contentItems: [{ type: "inputText", text: "done" }],
+			success: true,
+		}]]), { report: () => undefined }, tokenSource.token);
+		await firstRead;
+		await new Promise<void>(resolve => setImmediate(resolve));
+		await (bridge as unknown as { reconcileTurnBoundary(): Promise<void> }).reconcileTurnBoundary();
+		const boundary = await resumed;
+		assert.strictEqual(boundary.kind, "completed");
+		assert.strictEqual(threadReadParams.length, 2);
+		assert.ok(threadReadParams.every(params => !("includeTurns" in params)));
+		bridge.dispose();
+		tokenSource.dispose();
+		notifications.dispose();
+		stops.dispose();
+	});
+
+	test("falls back to ephemeral status reconciliation when includeTurns is rejected", async () => {
+		const notifications = new vscode.EventEmitter<CodexServerNotification>();
+		const stops = new vscode.EventEmitter<Error>();
+		const threadReadParams: Record<string, unknown>[] = [];
+		let markRejectedRead!: () => void;
+		const rejectedRead = new Promise<void>(resolve => { markRejectedRead = resolve; });
+		const fakeClient = {
+			onNotification: notifications.event,
+			onDidStop: stops.event,
+			request: async (method: string, params: Record<string, unknown>) => {
+				if (method === "turn/start") {
+					return { turn: { id: "turn-ephemeral-fallback", status: "inProgress" } };
+				}
+				if (method === "thread/read") {
+					threadReadParams.push(params);
+					if (threadReadParams.length === 1) {
+						markRejectedRead();
+						throw new Error("ephemeral threads do not support includeTurns");
+					}
+					return {
+						thread: {
+							id: "thread-ephemeral-fallback",
+							ephemeral: true,
+							status: { type: "idle" },
+						},
+					};
+				}
+				return {};
+			},
+		} as unknown as CodexAppServerClient;
+		const bridge = new CodexTurnBridge(fakeClient, "thread-ephemeral-fallback");
+		const tokenSource = new vscode.CancellationTokenSource();
+		const first = bridge.start(
+			{ threadId: "thread-ephemeral-fallback", input: [] },
+			{ report: () => undefined },
+			tokenSource.token
+		);
+		bridge.delegate({ callId: "call-ephemeral-fallback", tool: "grep_search", input: {} });
+		assert.strictEqual((await first).kind, "delegated");
+		const resumed = bridge.resume(new Map([["call-ephemeral-fallback", {
+			contentItems: [{ type: "inputText", text: "done" }],
+			success: true,
+		}]]), { report: () => undefined }, tokenSource.token);
+		await rejectedRead;
+		await new Promise<void>(resolve => setImmediate(resolve));
+		await (bridge as unknown as { reconcileTurnBoundary(): Promise<void> }).reconcileTurnBoundary();
+		await (bridge as unknown as { reconcileTurnBoundary(): Promise<void> }).reconcileTurnBoundary();
+		assert.strictEqual((await resumed).kind, "completed");
+		assert.strictEqual(threadReadParams[0].includeTurns, true);
+		assert.ok(threadReadParams.slice(1).every(params => !("includeTurns" in params)));
+		bridge.dispose();
+		tokenSource.dispose();
+		notifications.dispose();
+		stops.dispose();
+	});
+
+	test("rejects a resumed turn when reconciliation errors out past its deadline", async () => {
+		const notifications = new vscode.EventEmitter<CodexServerNotification>();
+		const stops = new vscode.EventEmitter<Error>();
+		let markReadStarted!: () => void;
+		let rejectRead!: (error: Error) => void;
+		const readStarted = new Promise<void>(resolve => { markReadStarted = resolve; });
+		const fakeClient = {
+			onNotification: notifications.event,
+			onDidStop: stops.event,
+			request: async (method: string) => {
+				if (method === "turn/start") {
+					return { turn: { id: "turn-stale", status: "inProgress" } };
+				}
+				if (method === "thread/read") {
+					markReadStarted();
+					return new Promise((_resolve, reject) => { rejectRead = reject; });
+				}
+				return {};
+			},
+		} as unknown as CodexAppServerClient;
+		const bridge = new CodexTurnBridge(fakeClient, "thread-stale");
+		const tokenSource = new vscode.CancellationTokenSource();
+		const first = bridge.start(
+			{ threadId: "thread-stale", input: [] },
+			{ report: () => undefined },
+			tokenSource.token
+		);
+		bridge.delegate({ callId: "call-stale", tool: "runSubagent", input: {} });
+		assert.strictEqual((await first).kind, "delegated");
+		const resumed = bridge.resume(new Map([["call-stale", {
+			contentItems: [{ type: "inputText", text: "done" }],
+			success: true,
+		}]]), { report: () => undefined }, tokenSource.token);
+		await readStarted;
+		(bridge as unknown as { reconcileDeadlineAt: number }).reconcileDeadlineAt = Date.now() - 1;
+		rejectRead(new Error("thread/read timed out"));
+		await assert.rejects(resumed, CodexStaleTurnError);
 		bridge.dispose();
 		tokenSource.dispose();
 		notifications.dispose();
@@ -307,6 +738,58 @@ suite("Codex subscription provider", () => {
 			params: { threadId: "thread-batch", turn: { id: "turn-batch", status: "completed", error: null } },
 		});
 		assert.strictEqual((await resumePromise).kind, "completed");
+		bridge.dispose();
+		tokenSource.dispose();
+		notifications.dispose();
+		stops.dispose();
+	});
+
+	test("queues late dynamic tool calls until the next native tool segment", async () => {
+		const notifications = new vscode.EventEmitter<CodexServerNotification>();
+		const stops = new vscode.EventEmitter<Error>();
+		const fakeClient = {
+			onNotification: notifications.event,
+			onDidStop: stops.event,
+			request: async (method: string) => method === "turn/start"
+				? { turn: { id: "turn-late", status: "inProgress" } }
+				: {},
+		} as unknown as CodexAppServerClient;
+		const bridge = new CodexTurnBridge(fakeClient, "thread-late");
+		const firstParts: vscode.LanguageModelResponsePart[] = [];
+		const secondParts: vscode.LanguageModelResponsePart[] = [];
+		const tokenSource = new vscode.CancellationTokenSource();
+		const firstBoundary = bridge.start(
+			{ threadId: "thread-late", input: [] },
+			{ report: part => firstParts.push(part) },
+			tokenSource.token
+		);
+		const firstResponse = bridge.delegate({ callId: "call-first", tool: "read_file", input: { path: "a" } });
+		assert.strictEqual((await firstBoundary).kind, "delegated");
+
+		const lateResponse = bridge.delegate({ callId: "call-late", tool: "grep_search", input: { query: "b" } });
+		assert.deepStrictEqual(bridge.reportedCalls.map(call => call.callId), ["call-first"]);
+		assert.deepStrictEqual(bridge.pendingCalls.map(call => call.callId), ["call-first", "call-late"]);
+
+		const secondBoundary = bridge.resume(new Map([
+			["call-first", { contentItems: [{ type: "inputText", text: "A" }], success: true }],
+		]), { report: part => secondParts.push(part) }, tokenSource.token);
+		assert.strictEqual((await firstResponse).success, true);
+		assert.strictEqual((await secondBoundary).kind, "delegated");
+		assert.deepStrictEqual(bridge.reportedCalls.map(call => call.callId), ["call-late"]);
+		assert.strictEqual(secondParts.filter(part => part instanceof vscode.LanguageModelToolCallPart).length, 1);
+		const latePart = secondParts.find(part => part instanceof vscode.LanguageModelToolCallPart);
+		assert.ok(latePart instanceof vscode.LanguageModelToolCallPart);
+		assert.strictEqual(latePart.callId, "call-late");
+
+		const completedBoundary = bridge.resume(new Map([
+			["call-late", { contentItems: [{ type: "inputText", text: "B" }], success: true }],
+		]), { report: () => undefined }, tokenSource.token);
+		assert.strictEqual((await lateResponse).success, true);
+		notifications.fire({
+			method: "turn/completed",
+			params: { threadId: "thread-late", turn: { id: "turn-late", status: "completed", error: null } },
+		});
+		assert.strictEqual((await completedBoundary).kind, "completed");
 		bridge.dispose();
 		tokenSource.dispose();
 		notifications.dispose();
@@ -611,6 +1094,18 @@ suite("Codex subscription provider", () => {
 		assert.ok(dynamic.callableNames.has("private_tool"));
 	});
 
+	test("adds model-routing guidance to the native subagent tool", () => {
+		const dynamic = buildCodexDynamicTools([{
+			name: "runSubagent",
+			description: "Run a listed agent",
+			inputSchema: { type: "object" },
+		}]);
+		const tool = dynamic.specs.find(spec => spec.type === "function");
+		assert.ok(tool && tool.type === "function");
+		assert.ok(tool.description.includes("Subagent model routing"));
+		assert.ok(tool.description.includes("inherits the parent model"));
+	});
+
 	test("defers uncommon Codex tools while keeping the core agent loop eager", () => {
 		const tools: vscode.LanguageModelChatTool[] = [
 			{ name: "read_file", description: "Read a workspace file", inputSchema: { type: "object" } },
@@ -713,6 +1208,29 @@ suite("Codex subscription provider", () => {
 		provider.dispose();
 	});
 
+	test("declines every internal Codex approval request", async () => {
+		const provider = new CodexChatModelProvider("test");
+		const internals = provider as unknown as {
+			handleServerRequest(request: { id: number; method: string; params: unknown }): Promise<unknown>;
+		};
+		assert.deepStrictEqual(await internals.handleServerRequest({
+			id: 1,
+			method: "item/commandExecution/requestApproval",
+			params: { threadId: "strict", command: "echo bypass" },
+		}), { decision: "decline" });
+		assert.deepStrictEqual(await internals.handleServerRequest({
+			id: 2,
+			method: "item/fileChange/requestApproval",
+			params: { threadId: "strict" },
+		}), { decision: "decline" });
+		assert.deepStrictEqual(await internals.handleServerRequest({
+			id: 3,
+			method: "item/permissions/requestApproval",
+			params: { threadId: "strict", permissions: { network: true } },
+		}), { permissions: {}, scope: "turn" });
+		provider.dispose();
+	});
+
 	test("formats Codex subscription usage", () => {
 		const formatted = formatCodexRateLimit({
 			limitId: "codex",
@@ -723,6 +1241,30 @@ suite("Codex subscription provider", () => {
 			rateLimitReachedType: null,
 		});
 		assert.strictEqual(formatted, "12% used / resets unknown reset");
+	});
+
+	test("uses current request usage instead of cumulative thread billing for context", () => {
+		const metrics = mapCodexTokenUsageMetrics("gpt-test", {
+			total: {
+				totalTokens: 12_889_873,
+				inputTokens: 12_865_404,
+				cachedInputTokens: 12_485_632,
+				outputTokens: 24_469,
+				reasoningOutputTokens: 6_991,
+			},
+			last: {
+				totalTokens: 126_998,
+				inputTokens: 126_146,
+				cachedInputTokens: 125_696,
+				outputTokens: 852,
+				reasoningOutputTokens: 516,
+			},
+			modelContextWindow: 258_400,
+		});
+		assert.strictEqual(metrics.contextUsedTokens, 126_998);
+		assert.strictEqual(metrics.contextWindowTokens, 258_400);
+		assert.ok((metrics.contextUsagePercent ?? 0) > 49 && (metrics.contextUsagePercent ?? 0) < 50);
+		assert.ok(metrics.contextDetail?.includes("thread cumulative usage 12,889,873"));
 	});
 
 	test("combines catalogs and routes prefixed Codex model ids", async () => {
@@ -761,6 +1303,55 @@ suite("Codex subscription provider", () => {
 		);
 		assert.deepStrictEqual(calls, ["codex"]);
 		assert.strictEqual(await provider.provideTokenCount(codexInfo!, "test", tokenSource.token), 2);
+		provider.dispose();
+		tokenSource.dispose();
+	});
+
+	test("refreshes Claude availability in background for another provider", async () => {
+		const events: string[] = [];
+		let releaseRefresh!: () => void;
+		let markRefreshDone!: () => void;
+		const refreshGate = new Promise<void>(resolve => { releaseRefresh = resolve; });
+		const refreshDone = new Promise<void>(resolve => { markRefreshDone = resolve; });
+		const makeProvider = (marker: string): vscode.LanguageModelChatProvider => ({
+			provideLanguageModelChatInformation: async () => [],
+			provideLanguageModelChatResponse: async () => { events.push(marker); },
+			provideTokenCount: async () => 1,
+		});
+		const claude = {
+			...makeProvider("claude"),
+			refreshSubscriptionUsage: async () => {
+				events.push("availability-started");
+				await refreshGate;
+				events.push("availability-finished");
+				markRefreshDone();
+			},
+		} as unknown as ClaudeChatModelProvider;
+		const provider = new CompositeChatModelProvider(
+			makeProvider("local"),
+			makeProvider("codex"),
+			claude
+		);
+		const tokenSource = new vscode.CancellationTokenSource();
+		await provider.provideLanguageModelChatResponse(
+			{
+				id: "codex::gpt-test",
+				name: "Codex",
+				family: "codex",
+				version: "1",
+				maxInputTokens: 100,
+				maxOutputTokens: 20,
+				capabilities: {},
+			},
+			[],
+			{ tools: [], toolMode: vscode.LanguageModelChatToolMode.Auto },
+			{ report: () => undefined },
+			tokenSource.token
+		);
+		assert.deepStrictEqual(events, ["availability-started", "codex"]);
+		releaseRefresh();
+		await refreshDone;
+		assert.deepStrictEqual(events, ["availability-started", "codex", "availability-finished"]);
 		provider.dispose();
 		tokenSource.dispose();
 	});

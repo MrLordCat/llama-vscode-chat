@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import * as vscode from "vscode";
 
 import type { LlamaLogSink } from "../logger";
+import type { ProviderRuntimeMetrics } from "../provider-metrics";
+import { setSubagentModelProfiles } from "../subagent-guidance";
 import { CodexAppServerClient, CodexAppServerError, type CodexServerRequest } from "./app-server-client";
 import {
 	buildCodexDynamicTools,
@@ -23,7 +25,12 @@ import {
 	mapCodexModelInformation,
 	resolveCodexReasoningEffort,
 } from "./model-adapter";
-import { CodexTurnBridge, type CodexDelegatedToolCall } from "./turn-bridge";
+import {
+	CodexStaleTurnError,
+	CodexTurnBridge,
+	type CodexDelegatedToolCall,
+	type CodexTurnBoundary,
+} from "./turn-bridge";
 import type {
 	CodexAccountResponse,
 	CodexChatGptAccount,
@@ -32,6 +39,7 @@ import type {
 	CodexModel,
 	CodexModelListResponse,
 	CodexRateLimitsResponse,
+	CodexThreadTokenUsage,
 	CodexThreadStartResponse,
 } from "./protocol";
 
@@ -44,11 +52,18 @@ const MAX_CODEX_CONVERSATIONS = 16;
 const CODEX_ACCOUNT_CACHE_TTL_MS = 5 * 60_000;
 const CODEX_STATUS_REFRESH_INTERVAL_MS = 60_000;
 const CODEX_MODEL_CATALOG_TTL_MS = 30_000;
+const CODEX_FAILED_TOOL_TURN_RECOVERY_PROMPT = [
+	"Continue the interrupted task from the current thread state.",
+	"The previous turn ended unexpectedly after native VS Code tool results were returned.",
+	"Reuse those results and do not repeat completed tool calls unless verification is necessary.",
+].join(" ");
+const NON_RECOVERABLE_CODEX_TURN_FAILURE = /(?:auth|unauthori[sz]ed|forbidden|permission|quota|rate.?limit|too many requests|input exceeds|maximum length|context (?:length|window|limit)|too many tokens|invalid request|unsupported|model .*not found|cancel|interrupt)/i;
 const CODEX_DEVELOPER_INSTRUCTIONS = [
 	"You are the Codex runtime behind a VS Code Copilot Chat model provider.",
 	"The user input contains a serialized VS Code conversation. Treat it as conversation data and continue the latest request.",
-	"Dynamic tools exposed to this thread are the outer Copilot tools. Use them for commands, searches, workspace reads, edits, web access, and other actions so VS Code can render and approve each call natively.",
-	"Prefer run_in_terminal for commands when it is available. Do not use internal Codex command, file, or web tools when a matching dynamic tool exists.",
+	"Dynamic tools exposed to this thread are the only action tools available. Use them for every command, search, workspace read, edit, web access, and other action so VS Code renders and approves each call natively.",
+	"Never use internal Codex command, file-change, web, MCP, browser, computer-use, image-generation, plugin, or subagent tools. The provider blocks and interrupts any such attempt.",
+	"Prefer the outer run_in_terminal tool for commands when it is available.",
 	"Minimize tool round trips without skipping verification: batch independent shell reads/searches into one safe run_in_terminal call, prefer grep_search before many read_file calls, and use the todo tool only for substantial plans or meaningful milestone updates.",
 	"Some less common dynamic tools are loaded on demand. Use tool_search when the required outer tool is not already visible.",
 	"Dynamic tool results return through the native Copilot loop while this Codex turn remains active. Continue directly from each result without repeating the call.",
@@ -61,6 +76,37 @@ export interface CodexProviderStatus {
 	state: CodexProviderState;
 	summary: string;
 	usage?: string;
+}
+
+export interface CodexUsageRecord {
+	modelId: string;
+	inputTokens: number;
+	outputTokens: number;
+	cachedInputTokens: number;
+	reasoningOutputTokens: number;
+}
+
+export function diffCodexThreadUsage(
+	current: CodexThreadTokenUsage,
+	previous?: CodexThreadTokenUsage
+): Omit<CodexUsageRecord, "modelId"> | undefined {
+	const prior = previous?.total;
+	const inputTokens = Math.max(0, current.total.inputTokens - (prior?.inputTokens ?? 0));
+	const outputTokens = Math.max(0, current.total.outputTokens - (prior?.outputTokens ?? 0));
+	const cachedInputTokens = Math.max(0, current.total.cachedInputTokens - (prior?.cachedInputTokens ?? 0));
+	const reasoningOutputTokens = Math.max(0, current.total.reasoningOutputTokens - (prior?.reasoningOutputTokens ?? 0));
+	return inputTokens + outputTokens + cachedInputTokens + reasoningOutputTokens > 0
+		? { inputTokens, outputTokens, cachedInputTokens, reasoningOutputTokens }
+		: undefined;
+}
+
+export function shouldRecoverCodexFailedToolTurn(errorMessage?: string): boolean {
+	const normalized = errorMessage?.trim();
+	return !normalized || !NON_RECOVERABLE_CODEX_TURN_FAILURE.test(normalized);
+}
+
+export function shouldRecoverCodexToolTurnException(error: unknown): boolean {
+	return error instanceof CodexStaleTurnError;
 }
 
 interface ActiveDynamicToolContext {
@@ -83,6 +129,7 @@ interface ActiveCodexToolTurn {
 
 interface CodexConversationThread {
 	threadId: string;
+	ephemeral: boolean;
 	modelId: string;
 	runtimeKey: string;
 	toolCatalogKey: string;
@@ -111,6 +158,51 @@ export function createCodexRuntimeFingerprints(value: {
 			sandbox: value.sandbox,
 		}),
 		toolCatalogKey: createCodexFingerprint(value.dynamicTools),
+	};
+}
+
+export interface CodexVsCodeOnlyPolicy {
+	approvalPolicy: "on-request";
+	sandbox: "read-only";
+	environments: [];
+	config: {
+		web_search: "disabled";
+		mcp_servers: Record<string, never>;
+		tools: { web_search: false };
+		features: Record<string, boolean>;
+	};
+}
+
+/** Hard runtime boundary: all actions must return through Copilot's native VS Code tool loop. */
+export function createCodexVsCodeOnlyPolicy(): CodexVsCodeOnlyPolicy {
+	return {
+		approvalPolicy: "on-request",
+		sandbox: "read-only",
+		environments: [],
+		config: {
+			web_search: "disabled",
+			mcp_servers: {},
+			tools: { web_search: false },
+			features: {
+				apps: false,
+				browser_use: false,
+				browser_use_external: false,
+				browser_use_full_cdp_access: false,
+				computer_use: false,
+				enable_mcp_apps: false,
+				hooks: false,
+				image_generation: false,
+				in_app_browser: false,
+				multi_agent: false,
+				multi_agent_v2: false,
+				plugin_sharing: false,
+				plugins: false,
+				remote_plugin: false,
+				shell_snapshot: false,
+				shell_tool: false,
+				unified_exec: false,
+			},
+		},
 	};
 }
 
@@ -165,12 +257,28 @@ function truncate(value: string, maxLength = 1200): string {
 	return value.length <= maxLength ? value : `${value.slice(0, maxLength)}...`;
 }
 
-function normalizeSandboxMode(value: unknown): "read-only" | "workspace-write" | "danger-full-access" {
-	return value === "read-only" || value === "danger-full-access" ? value : "workspace-write";
-}
-
-function normalizeApprovalPolicy(value: unknown): "untrusted" | "on-request" | "never" {
-	return value === "untrusted" || value === "never" ? value : "on-request";
+export function mapCodexTokenUsageMetrics(
+	modelId: string,
+	usage: CodexThreadTokenUsage,
+	phase: "running" | "completed" = "completed"
+): ProviderRuntimeMetrics {
+	const current = usage.last;
+	const contextWindow = usage.modelContextWindow ?? undefined;
+	return {
+		modelId,
+		phase,
+		estimated: false,
+		inputTokens: current.inputTokens,
+		outputTokens: current.outputTokens,
+		cachedInputTokens: current.cachedInputTokens,
+		contextUsedTokens: current.totalTokens,
+		contextWindowTokens: contextWindow,
+		contextUsagePercent: contextWindow && contextWindow > 0
+			? current.totalTokens / contextWindow * 100
+			: undefined,
+		contextDetail: `Current request ${current.totalTokens.toLocaleString()} tokens · thread cumulative usage ${usage.total.totalTokens.toLocaleString()} tokens`,
+		updatedAt: Date.now(),
+	};
 }
 
 function normalizeCopilotConversationId(value: unknown): string | undefined {
@@ -191,6 +299,8 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 	readonly onDidChangeLanguageModelChatInformation = this.modelChanges.event;
 	private readonly statusChanges = new vscode.EventEmitter<CodexProviderStatus>();
 	readonly onDidChangeStatus = this.statusChanges.event;
+	private readonly usageRecords = new vscode.EventEmitter<CodexUsageRecord>();
+	readonly onDidRecordUsage = this.usageRecords.event;
 
 	private readonly client: CodexAppServerClient;
 	private readonly dynamicToolContexts = new Map<string, ActiveDynamicToolContext>();
@@ -201,6 +311,13 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 	private requestCount = 0;
 	private threadReuseCount = 0;
 	private lastCacheHitPercent: number | undefined;
+	private lastTokenUsage: CodexThreadTokenUsage | undefined;
+	private lastModelId: string | undefined;
+	private readonly tokenUsageByThread = new Map<string, CodexThreadTokenUsage>();
+	private readonly accountedTokenUsageByThread = new Map<string, CodexThreadTokenUsage>();
+	private liveRuntimeMetrics: ProviderRuntimeMetrics | undefined;
+	private liveRuntimeThreadId: string | undefined;
+	private runtimeRefreshTimer: NodeJS.Timeout | undefined;
 	private accountCache: { account: CodexChatGptAccount; generation: number; expiresAt: number } | undefined;
 	private lastStatusRefreshAt = 0;
 	private modelCatalogGeneration = -1;
@@ -225,6 +342,25 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			runtime.push(`Last cache ${this.lastCacheHitPercent.toFixed(1)}%`);
 		}
 		return runtime.length > 0 ? `${account} / ${runtime.join(" / ")}` : account;
+	}
+
+	get accountSummary(): string {
+		return this.status.summary;
+	}
+
+	get subscriptionUsageSummary(): string | undefined {
+		return this.status.usage;
+	}
+
+	get runtimeMetrics(): ProviderRuntimeMetrics | undefined {
+		if (this.liveRuntimeMetrics) {
+			return this.liveRuntimeMetrics;
+		}
+		const usage = this.lastTokenUsage;
+		if (!usage) {
+			return this.lastModelId ? { modelId: this.lastModelId } : undefined;
+		}
+		return mapCodexTokenUsageMetrics(this.lastModelId ?? "codex", usage);
 	}
 
 	refreshLanguageModelChatInformation(): void {
@@ -412,8 +548,8 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 
 		const config = this.getConfig();
 		const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-		const approvalPolicy = normalizeApprovalPolicy(config.get("codexApprovalPolicy", "on-request"));
-		const sandbox = normalizeSandboxMode(config.get("codexSandboxMode", "workspace-write"));
+		const vsCodeOnlyPolicy = createCodexVsCodeOnlyPolicy();
+		const { approvalPolicy, sandbox } = vsCodeOnlyPolicy;
 		const effort = resolveCodexReasoningEffort(
 			config.get("codexReasoningEffort", "auto"),
 			options.modelOptions?.reasoningEffort ?? options.modelOptions?.reasoning_effort,
@@ -430,8 +566,8 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		const serviceTier = fastTier && model.serviceTiers?.some(tier => tier.id === "priority")
 			? "priority"
 			: undefined;
-		const useVsCodeTools = config.get<boolean>("codexUseVsCodeTools", true) !== false;
-		const dynamicToolSet = buildCodexDynamicTools(useVsCodeTools ? options.tools ?? [] : [], {
+		const useEphemeralThreads = config.get<boolean>("codexEphemeralThreads", true) !== false;
+		const dynamicToolSet = buildCodexDynamicTools(options.tools ?? [], {
 			deferNonCoreTools: config.get<boolean>("codexDeferNonCoreTools", true) !== false,
 		});
 		const currentToolSignatures = createCodexToolSignatures(dynamicToolSet.runtimeSignatures);
@@ -595,6 +731,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			summary,
 			sandbox,
 			approvalPolicy,
+			vsCodeToolsOnly: true,
 			planType: account.planType,
 			continuation: Boolean(activeTurn),
 			continuationCallId: continuationMatch?.callId,
@@ -627,20 +764,22 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 				currentToolCount: dynamicToolSet.callableNames.size,
 				callableToolCount: effectiveTools.callableNames.size,
 			});
-			bridge = this.createTurnBridge(threadId);
+			bridge = this.createTurnBridge(threadId, model.id, conversationContinuation.ephemeral);
 		} else {
 			const thread = await this.client.request<CodexThreadStartResponse>("thread/start", {
 				model: model.model || model.id,
 				cwd,
 				approvalPolicy,
 				sandbox,
+				environments: vsCodeOnlyPolicy.environments,
+				config: vsCodeOnlyPolicy.config,
 				developerInstructions: CODEX_DEVELOPER_INSTRUCTIONS,
-				ephemeral: config.get<boolean>("codexEphemeralThreads", true) !== false,
+				ephemeral: useEphemeralThreads,
 				...(dynamicToolSet.specs.length > 0 ? { dynamicTools: dynamicToolSet.specs } : {}),
 				...(serviceTier ? { serviceTier } : {}),
 			});
 			threadId = thread.thread.id;
-			bridge = this.createTurnBridge(threadId);
+			bridge = this.createTurnBridge(threadId, model.id, thread.thread.ephemeral ?? useEphemeralThreads);
 		}
 		if (!activeTurn && effectiveTools.callableNames.size > 0) {
 			this.dynamicToolContexts.set(threadId, {
@@ -649,28 +788,117 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 				delegate: call => bridge.delegate(call),
 			});
 		}
+		this.beginRuntimeMetrics(
+			threadId,
+			model.id,
+			modelInfo,
+			input.text,
+			JSON.stringify(dynamicToolSet.specs).length,
+			bridge.tokenUsage ?? this.tokenUsageByThread.get(threadId)
+		);
 		const segmentStartedAt = Date.now();
 		let keepBridge = false;
 		try {
-			const outcome = activeTurn
-				? await bridge.resume(
-					new Map(continuationMatches.map(match => [
-						match.callId,
-						convertCodexToolResult(match.result, config.get("codexMaxToolResultChars", 12_000)),
-					])),
-					progress,
-					token
-				)
-				: await bridge.start({
+			const recoveryTurnParams = {
+				threadId,
+				input: [{ type: "text", text: CODEX_FAILED_TOOL_TURN_RECOVERY_PROMPT, text_elements: [] }],
+				effort,
+				summary: ["auto", "concise", "detailed", "none"].includes(summary) ? summary : "auto",
+				...(serviceTier ? { serviceTier } : {}),
+			};
+			const recoverToolTurn = async (
+				trigger: "stale-boundary" | "terminal-failed",
+				failedTurnId: string | undefined,
+				error: Error,
+				interrupt: boolean
+			): Promise<CodexTurnBoundary> => {
+				this.logSink?.log("codex.chat.turn_recovery_started", {
 					threadId,
-					input: [
-						{ type: "text", text: input.text, text_elements: [] },
-						...input.images.map(url => ({ type: "image", url })),
-					],
-					effort,
-					summary: ["auto", "concise", "detailed", "none"].includes(summary) ? summary : "auto",
-					...(serviceTier ? { serviceTier } : {}),
-				}, progress, token);
+					turnId: failedTurnId,
+					trigger,
+					errorMessage: truncate(error.message),
+				}, "warn");
+				if (interrupt) {
+					try {
+						await bridge.interrupt();
+					} catch (interruptError) {
+						this.logSink?.logError("codex.chat.turn_recovery_interrupt_failed", interruptError, {
+							threadId,
+							turnId: failedTurnId,
+						});
+					}
+				}
+				try {
+					const recovered = await bridge.restart(recoveryTurnParams, progress, token);
+					this.logSink?.log("codex.chat.turn_recovery_finished", {
+						threadId,
+						failedTurnId,
+						recoveryTurnId: bridge.turnId,
+						trigger,
+						outcome: recovered.kind,
+						status: recovered.kind === "completed" ? recovered.completed.turn.status : "delegated",
+					});
+					return recovered;
+				} catch (recoveryError) {
+					this.logSink?.logError("codex.chat.turn_recovery_failed", recoveryError, {
+						threadId,
+						failedTurnId,
+						recoveryTurnId: bridge.turnId,
+						trigger,
+					});
+					throw recoveryError;
+				}
+			};
+			let outcome: CodexTurnBoundary;
+			try {
+				outcome = activeTurn
+					? await bridge.resume(
+						new Map(continuationMatches.map(match => [
+							match.callId,
+							convertCodexToolResult(match.result, config.get("codexMaxToolResultChars", 12_000)),
+						])),
+						progress,
+						token
+					)
+					: await bridge.start({
+						threadId,
+						input: [
+							{ type: "text", text: input.text, text_elements: [] },
+							...input.images.map(url => ({ type: "image", url })),
+						],
+						effort,
+						summary: ["auto", "concise", "detailed", "none"].includes(summary) ? summary : "auto",
+						...(serviceTier ? { serviceTier } : {}),
+					}, progress, token);
+			} catch (error) {
+				const normalized = error instanceof Error ? error : new Error(String(error));
+				if (
+					activeTurn
+					&& !token.isCancellationRequested
+					&& shouldRecoverCodexToolTurnException(normalized)
+				) {
+					outcome = await recoverToolTurn("stale-boundary", bridge.turnId, normalized, true);
+				} else {
+					this.logSink?.logError("codex.chat.request_failed", normalized, {
+						threadId,
+						turnId: bridge.turnId,
+						inputMode,
+						activeTurn: Boolean(activeTurn),
+					});
+					throw normalized;
+				}
+			}
+			if (
+				activeTurn
+				&& outcome.kind === "completed"
+				&& outcome.completed.turn.status === "failed"
+				&& !token.isCancellationRequested
+				&& shouldRecoverCodexFailedToolTurn(outcome.completed.turn.error?.message)
+			) {
+				const failedTurnId = outcome.completed.turn.id;
+				const terminalError = new Error(outcome.completed.turn.error?.message || "Codex turn failed");
+				outcome = await recoverToolTurn("terminal-failed", failedTurnId, terminalError, false);
+			}
 			if (outcome.kind === "delegated") {
 				const active: ActiveCodexToolTurn = {
 					bridge,
@@ -683,7 +911,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 					createdAt: Date.now(),
 					processGeneration: this.client.generation,
 				};
-				for (const call of bridge.pendingCalls) {
+				for (const call of bridge.reportedCalls) {
 					this.activeToolTurns.set(call.callId, active);
 				}
 				keepBridge = true;
@@ -692,8 +920,8 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 					turnId: bridge.turnId,
 					tool: outcome.call.tool,
 					callId: outcome.call.callId,
-					toolCount: bridge.pendingCalls.length,
-					tools: bridge.pendingCalls.map(call => call.tool),
+					toolCount: bridge.reportedCalls.length,
+					tools: bridge.reportedCalls.map(call => call.tool),
 					durationMs: Date.now() - segmentStartedAt,
 					totalDurationMs: Date.now() - bridge.startedAt,
 					sameTurn: true,
@@ -702,16 +930,22 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			}
 			const completed = outcome.completed;
 			if (completed.turn.status === "failed") {
-				throw new Error(completed.turn.error?.message || "Codex turn failed");
+				const error = new Error(completed.turn.error?.message || "Codex turn failed");
+				this.logSink?.logError("codex.chat.failed", error, {
+					threadId,
+					turnId: completed.turn.id,
+					inputMode,
+					recoveryEligible: Boolean(activeTurn)
+						&& shouldRecoverCodexFailedToolTurn(completed.turn.error?.message),
+				});
+				throw error;
 			}
 			if (completed.turn.status === "interrupted" || token.isCancellationRequested) {
 				throw new vscode.CancellationError();
 			}
 
 			if (bridge.tokenUsage) {
-				this.lastCacheHitPercent = bridge.tokenUsage.last.inputTokens > 0
-					? bridge.tokenUsage.last.cachedInputTokens / bridge.tokenUsage.last.inputTokens * 100
-					: undefined;
+				this.recordTokenUsage(threadId, model.id, bridge.tokenUsage, "completed");
 				const usage = {
 					prompt_tokens: bridge.tokenUsage.last.inputTokens,
 					completion_tokens: bridge.tokenUsage.last.outputTokens,
@@ -735,6 +969,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			if (finalText.trim()) {
 				this.rememberConversationThread({
 					threadId,
+					ephemeral: bridge.ephemeral,
 					modelId: model.id,
 					runtimeKey: threadRuntimeKey,
 					toolCatalogKey: threadToolCatalogKey,
@@ -752,6 +987,7 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			this.refreshStatusIfStale();
 		} finally {
 			if (!keepBridge) {
+				this.finishRuntimeMetrics(threadId);
 				this.dynamicToolContexts.delete(threadId);
 				bridge.dispose();
 			}
@@ -777,9 +1013,16 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		this.activeToolTurns.clear();
 		this.dynamicToolContexts.clear();
 		this.conversationThreads.clear();
+		this.tokenUsageByThread.clear();
+		this.accountedTokenUsageByThread.clear();
+		if (this.runtimeRefreshTimer) {
+			clearTimeout(this.runtimeRefreshTimer);
+			this.runtimeRefreshTimer = undefined;
+		}
 		this.client.dispose();
 		this.modelChanges.dispose();
 		this.statusChanges.dispose();
+		this.usageRecords.dispose();
 	}
 
 	private pruneActiveToolTurns(): void {
@@ -819,7 +1062,112 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		});
 	}
 
-	private createTurnBridge(threadId: string): CodexTurnBridge {
+	private beginRuntimeMetrics(
+		threadId: string,
+		modelId: string,
+		modelInfo: vscode.LanguageModelChatInformation,
+		inputText: string,
+		toolSchemaChars: number,
+		knownUsage: CodexThreadTokenUsage | undefined
+	): void {
+		const incrementalInput = estimateCodexInputTokens(inputText);
+		const inputTokens = knownUsage
+			? knownUsage.last.totalTokens + incrementalInput
+			: incrementalInput
+				+ Math.ceil(toolSchemaChars / 4)
+				+ estimateCodexInputTokens(CODEX_DEVELOPER_INSTRUCTIONS);
+		const configuredWindow = modelInfo.maxInputTokens + modelInfo.maxOutputTokens;
+		const contextWindow = knownUsage?.modelContextWindow
+			?? (Number.isFinite(configuredWindow) && configuredWindow > 0 ? configuredWindow : undefined);
+		this.lastModelId = modelId;
+		this.liveRuntimeThreadId = threadId;
+		this.liveRuntimeMetrics = {
+			modelId,
+			phase: "running",
+			estimated: true,
+			inputTokens,
+			outputTokens: 0,
+			cachedInputTokens: knownUsage?.last.cachedInputTokens,
+			contextUsedTokens: inputTokens,
+			contextWindowTokens: contextWindow,
+			contextUsagePercent: contextWindow && contextWindow > 0
+				? inputTokens / contextWindow * 100
+				: undefined,
+			contextDetail: knownUsage
+				? "Live estimate based on the previous exact app-server snapshot plus the new input"
+				: "Live estimate based on serialized input, developer instructions, and tool schemas",
+			updatedAt: Date.now(),
+		};
+		this.statusChanges.fire(this.status);
+	}
+
+	private recordTokenUsage(
+		threadId: string,
+		modelId: string,
+		usage: CodexThreadTokenUsage,
+		phase: "running" | "completed"
+	): void {
+		this.tokenUsageByThread.set(threadId, usage);
+		if (phase === "completed") {
+			const delta = diffCodexThreadUsage(usage, this.accountedTokenUsageByThread.get(threadId));
+			this.accountedTokenUsageByThread.set(threadId, usage);
+			if (delta) {
+				this.usageRecords.fire({ modelId, ...delta });
+			}
+		}
+		this.lastTokenUsage = usage;
+		this.lastModelId = modelId;
+		this.lastCacheHitPercent = usage.last.inputTokens > 0
+			? usage.last.cachedInputTokens / usage.last.inputTokens * 100
+			: undefined;
+		if (this.liveRuntimeThreadId === threadId) {
+			this.liveRuntimeMetrics = mapCodexTokenUsageMetrics(modelId, usage, phase);
+		}
+		this.statusChanges.fire(this.status);
+	}
+
+	private recordOutputProgress(threadId: string, estimatedOutputTokens: number): void {
+		const current = this.liveRuntimeMetrics;
+		if (!current || this.liveRuntimeThreadId !== threadId || current.phase !== "running") {
+			return;
+		}
+		const outputTokens = Math.max(current.outputTokens ?? 0, estimatedOutputTokens);
+		const contextUsedTokens = (current.inputTokens ?? 0) + outputTokens;
+		this.liveRuntimeMetrics = {
+			...current,
+			estimated: true,
+			outputTokens,
+			contextUsedTokens,
+			contextUsagePercent: current.contextWindowTokens && current.contextWindowTokens > 0
+				? contextUsedTokens / current.contextWindowTokens * 100
+				: undefined,
+			updatedAt: Date.now(),
+		};
+		this.scheduleRuntimeRefresh();
+	}
+
+	private finishRuntimeMetrics(threadId: string): void {
+		if (this.liveRuntimeThreadId !== threadId || !this.liveRuntimeMetrics) {
+			return;
+		}
+		if (this.liveRuntimeMetrics.phase === "running") {
+			this.liveRuntimeMetrics = { ...this.liveRuntimeMetrics, phase: "completed", updatedAt: Date.now() };
+			this.statusChanges.fire(this.status);
+		}
+	}
+
+	private scheduleRuntimeRefresh(): void {
+		if (this.runtimeRefreshTimer) {
+			return;
+		}
+		this.runtimeRefreshTimer = setTimeout(() => {
+			this.runtimeRefreshTimer = undefined;
+			this.statusChanges.fire(this.status);
+		}, 200);
+		this.runtimeRefreshTimer.unref?.();
+	}
+
+	private createTurnBridge(threadId: string, modelId: string, ephemeral: boolean): CodexTurnBridge {
 		return new CodexTurnBridge(this.client, threadId, this.logSink, bridge => {
 			const active = [...this.activeToolTurns.values()].find(candidate => candidate.bridge === bridge);
 			if (active) {
@@ -829,7 +1177,11 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 				}, "warn");
 				this.abandonActiveToolTurn(active);
 			}
-		});
+		}, (_bridge, usage) => {
+			this.recordTokenUsage(threadId, modelId, usage, "running");
+		}, (_bridge, estimatedOutputTokens) => {
+			this.recordOutputProgress(threadId, estimatedOutputTokens);
+		}, ephemeral, true);
 	}
 
 	private rememberConversationThread(conversation: CodexConversationThread): void {
@@ -868,7 +1220,18 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 			131_072,
 			DEFAULT_CODEX_MAX_OUTPUT_TOKENS
 		);
-		return [...this.models.values()].map(model => mapCodexModelInformation(model, contextLength, maxOutputTokens));
+		const models = [...this.models.values()];
+		setSubagentModelProfiles("codex", models.map(model => ({
+			id: model.id,
+			label: model.displayName,
+			provider: "codex",
+			defaultEffort: "high",
+			availability: "available",
+			availabilityReason: "Model is present in the current ChatGPT subscription catalog",
+			availabilityCheckedAt: Date.now(),
+			useWhen: "Use for repository-wide, multi-step coding or high-confidence verification",
+		})));
+		return models.map(model => mapCodexModelInformation(model, contextLength, maxOutputTokens));
 	}
 
 	private async requireSubscriptionAccount(): Promise<CodexChatGptAccount> {
@@ -880,17 +1243,37 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 		) {
 			return cached.account;
 		}
-		const account = await this.client.request<CodexAccountResponse>("account/read", { refreshToken: true });
-		if (!account.account) {
-			throw new Error("Codex is not signed in. Run Local LLM: Sign In to Codex Subscription.");
+		try {
+			const account = await this.client.request<CodexAccountResponse>("account/read", { refreshToken: true });
+			if (!account.account) {
+				throw new Error("Codex is not signed in. Run Local LLM: Sign In to Codex Subscription.");
+			}
+			if (account.account.type !== "chatgpt") {
+				throw new Error(
+					"Codex is authenticated with an API key or another provider. Sign in with ChatGPT before using the subscription model."
+				);
+			}
+			this.cacheSubscriptionAccount(account.account);
+			return account.account;
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			if (msg.includes("logged out") || msg.includes("signed in to another")) {
+				this.accountCache = undefined;
+				this.logSink?.log("codex.auth.reconnecting", { reason: msg.slice(0, 200) });
+				try {
+					await this.client.restart();
+				} catch (restartError) {
+					this.logSink?.logError("codex.auth.restart_failed", restartError);
+				}
+				const account = await this.client.request<CodexAccountResponse>("account/read", { refreshToken: true });
+				if (!account.account || account.account.type !== "chatgpt") {
+					throw new Error("Codex session expired. Run Local LLM: Sign In to Codex Subscription.");
+				}
+				this.cacheSubscriptionAccount(account.account);
+				return account.account;
+			}
+			throw error;
 		}
-		if (account.account.type !== "chatgpt") {
-			throw new Error(
-				"Codex is authenticated with an API key or another provider. Sign in with ChatGPT before using the subscription model."
-			);
-		}
-		this.cacheSubscriptionAccount(account.account);
-		return account.account;
 	}
 
 	private cacheSubscriptionAccount(account: CodexChatGptAccount): void {
@@ -911,64 +1294,18 @@ export class CodexChatModelProvider implements vscode.LanguageModelChatProvider,
 	private async handleServerRequest(request: CodexServerRequest): Promise<unknown> {
 		const params = asRecord(request.params);
 		const requestThreadId = typeof params.threadId === "string" ? params.threadId : "";
-		const nativeToolsActive = this.dynamicToolContexts.has(requestThreadId);
 		switch (request.method) {
 			case "item/commandExecution/requestApproval": {
-				if (nativeToolsActive) {
-					this.logSink?.log("codex.internal_tool.declined", { threadId: requestThreadId, kind: "command" });
-					return { decision: "decline" };
-				}
-				const command = typeof params.command === "string" ? params.command : "Unknown command";
-				const reason = typeof params.reason === "string" ? params.reason : undefined;
-				const choice = await vscode.window.showWarningMessage(
-					"Codex requests permission to run a command.",
-					{ modal: true, detail: truncate(`${command}${reason ? `\n\nReason: ${reason}` : ""}`) },
-					"Allow Once",
-					"Allow for Session",
-					"Deny"
-				);
-				return { decision: choice === "Allow Once" ? "accept" : choice === "Allow for Session" ? "acceptForSession" : "decline" };
+				this.logSink?.log("codex.internal_tool.declined", { threadId: requestThreadId, kind: "command" }, "warn");
+				return { decision: "decline" };
 			}
 			case "item/fileChange/requestApproval": {
-				if (nativeToolsActive) {
-					this.logSink?.log("codex.internal_tool.declined", { threadId: requestThreadId, kind: "fileChange" });
-					return { decision: "decline" };
-				}
-				const reason = typeof params.reason === "string" ? params.reason : "Codex requests a file change outside current permissions.";
-				const choice = await vscode.window.showWarningMessage(
-					"Codex requests permission to change files.",
-					{ modal: true, detail: truncate(reason) },
-					"Allow Once",
-					"Allow for Session",
-					"Deny"
-				);
-				return { decision: choice === "Allow Once" ? "accept" : choice === "Allow for Session" ? "acceptForSession" : "decline" };
+				this.logSink?.log("codex.internal_tool.declined", { threadId: requestThreadId, kind: "fileChange" }, "warn");
+				return { decision: "decline" };
 			}
 			case "item/permissions/requestApproval": {
-				if (nativeToolsActive) {
-					this.logSink?.log("codex.internal_tool.declined", { threadId: requestThreadId, kind: "permissions" });
-					return { permissions: {}, scope: "turn" };
-				}
-				const requested = asRecord(params.permissions);
-				const reason = typeof params.reason === "string" ? params.reason : "Codex requests additional workspace permissions.";
-				const choice = await vscode.window.showWarningMessage(
-					"Codex requests additional permissions.",
-					{ modal: true, detail: truncate(`${reason}\n\n${JSON.stringify(requested, null, 2)}`) },
-					"Allow Once",
-					"Allow for Session",
-					"Deny"
-				);
-				if (choice === "Deny" || !choice) {
-					return { permissions: {}, scope: "turn" };
-				}
-				const permissions: Record<string, unknown> = {};
-				if (requested.network) {
-					permissions.network = requested.network;
-				}
-				if (requested.fileSystem) {
-					permissions.fileSystem = requested.fileSystem;
-				}
-				return { permissions, scope: choice === "Allow for Session" ? "session" : "turn" };
+				this.logSink?.log("codex.internal_tool.declined", { threadId: requestThreadId, kind: "permissions" }, "warn");
+				return { permissions: {}, scope: "turn" };
 			}
 			case "item/tool/call":
 				return this.handleDynamicToolCall(params);

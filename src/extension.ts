@@ -26,7 +26,17 @@ import { registerMemoryTools } from "./memory/tools";
 import { registerModelBehaviorCommands } from "./ui/model-behavior-commands";
 import { LlamaQuickActionsProvider } from "./ui/quick-access";
 import { CodexChatModelProvider } from "./codex/codex-provider";
+import { ClaudeChatModelProvider } from "./claude/claude-provider";
 import { CompositeChatModelProvider } from "./composite-provider";
+import type { ProviderRuntimeMetrics } from "./provider-metrics";
+import { parseProviderModelId } from "./model-sources/source-routing";
+import { getSubagentModelProfiles } from "./subagent-guidance";
+import { TokenUsageHistory, type TokenUsageSample } from "./token-usage-history";
+import {
+	renderUsageExperimentMarkdown,
+	UsageExperimentTracker,
+	type ExperimentVariant,
+} from "./usage-experiment";
 
 interface ContextUsageDisplay {
 	summary: string;
@@ -34,6 +44,15 @@ interface ContextUsageDisplay {
 	statusBarText: string;
 	tooltip: string;
 	tooltipLines: string[];
+}
+
+type RuntimeSource = "local" | "deepseek";
+
+function runtimeSourceForModel(modelId: string): RuntimeSource {
+	const parsed = parseProviderModelId(modelId);
+	return parsed.sourceKey === "deepseek" || parsed.modelId.toLowerCase().includes("deepseek")
+		? "deepseek"
+		: "local";
 }
 
 function formatNumber(value: number): string {
@@ -152,21 +171,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const logService = new LlamaLogService(context);
 	const memoryService = new SharedMemoryService(context.globalStorageUri.fsPath);
 	const sessionQuality = new SessionQualityTracker();
+	const tokenUsageHistory = new TokenUsageHistory(
+		context.globalState,
+		error => logService.logError("token_usage.persist_failed", error)
+	);
+	const usageExperiments = new UsageExperimentTracker(
+		context.globalState,
+		error => logService.logError("usage_experiment.persist_failed", error)
+	);
+	const recordUsage = (sample: TokenUsageSample, modelId?: string): void => {
+		tokenUsageHistory.record(sample);
+		usageExperiments.record(sample, modelId);
+	};
 	context.subscriptions.push(logService);
+	context.subscriptions.push(tokenUsageHistory);
+	context.subscriptions.push(usageExperiments);
 	await Promise.all([logService.initialize(), memoryService.initialize()]);
 	registerMemoryTools(context, memoryService);
 
 	// Llama.cpp Provider
 	const llamaProvider = new LlamaCppChatModelProvider(context.secrets, ua, logService, memoryService);
 	const codexProvider = new CodexChatModelProvider(extVersion, logService);
+	const claudeProvider = new ClaudeChatModelProvider(extVersion, logService);
 	context.subscriptions.push(codexProvider);
-	const compositeProvider = new CompositeChatModelProvider(llamaProvider, codexProvider);
+	context.subscriptions.push(claudeProvider);
+	const compositeProvider = new CompositeChatModelProvider(llamaProvider, codexProvider, claudeProvider);
 	context.subscriptions.push(compositeProvider);
 	context.subscriptions.push(vscode.lm.registerLanguageModelChatProvider(PROVIDER_VENDOR, compositeProvider));
 	let lastThroughput: string | undefined;
 	let lastPromptCache: string | undefined;
 	let lastContextUsage: ContextUsageDisplay | undefined;
 	let lastHealthStatus: string | undefined;
+	const runtimeMetrics = new Map<RuntimeSource, ProviderRuntimeMetrics>();
 	const quickActionsProvider = new LlamaQuickActionsProvider(
 		() => lastThroughput,
 		() => lastContextUsage,
@@ -175,15 +211,52 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		() => sessionQuality.count === 0 ? "No turns" : `${sessionQuality.count} turns / cache ${sessionQuality.summary.cacheHitPercent ?? "n/a"}%`,
 		() => lastHealthStatus,
 		() => memoryService.expiredCount,
-		() => codexProvider.statusSummary
+		() => codexProvider.accountSummary,
+		() => claudeProvider.accountSummary,
+		() => claudeProvider.usageSummary,
+		() => claudeProvider.lastRequestUsage,
+		() => claudeProvider.subscriptionUsageLimits,
+		() => runtimeMetrics.get("local"),
+		() => runtimeMetrics.get("deepseek"),
+		() => codexProvider.runtimeMetrics,
+		() => claudeProvider.runtimeMetrics,
+		() => codexProvider.subscriptionUsageSummary,
+		() => getSubagentModelProfiles(),
+		() => tokenUsageHistory.summary,
+		() => usageExperiments.summary
 	);
 	context.subscriptions.push(vscode.window.registerTreeDataProvider("llamacpp-quick-actions", quickActionsProvider));
 	context.subscriptions.push(memoryService.onDidChange(() => quickActionsProvider.refresh()));
+	context.subscriptions.push(tokenUsageHistory.onDidChange(() => quickActionsProvider.refresh()));
+	context.subscriptions.push(usageExperiments.onDidChange(() => quickActionsProvider.refresh()));
 	context.subscriptions.push(codexProvider.onDidChangeStatus(() => quickActionsProvider.refresh()));
+	context.subscriptions.push(claudeProvider.onDidChangeStatus(() => quickActionsProvider.refresh()));
+	context.subscriptions.push(codexProvider.onDidRecordUsage(usage => {
+		recordUsage({
+			provider: "codex",
+			inputTokens: usage.inputTokens,
+			outputTokens: usage.outputTokens,
+			cachedInputTokens: usage.cachedInputTokens,
+			reasoningOutputTokens: usage.reasoningOutputTokens,
+		}, usage.modelId);
+	}));
+	context.subscriptions.push(claudeProvider.onDidRecordUsage(usage => {
+		recordUsage({
+			provider: "claude",
+			inputTokens: usage.inputTokens + usage.cacheReadInputTokens + usage.cacheCreationInputTokens,
+			outputTokens: usage.outputTokens,
+			cachedInputTokens: usage.cacheReadInputTokens,
+			cacheWriteInputTokens: usage.cacheCreationInputTokens,
+			modelTurns: usage.modelTurns,
+			durationMs: usage.durationMs,
+		}, usage.modelId);
+	}));
 	context.subscriptions.push(...registerModelBehaviorCommands(() => quickActionsProvider.refresh()));
 	llamaProvider.refreshLanguageModelChatInformation();
 	codexProvider.refreshLanguageModelChatInformation();
+	claudeProvider.refreshLanguageModelChatInformation();
 	void codexProvider.refreshStatus().catch(error => logService.logError("codex.initial_status.failed", error));
+	void claudeProvider.refreshStatus().catch(error => logService.logError("claude.initial_status.failed", error));
 
 	const performanceStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 95);
 	performanceStatusBar.name = "Local LLM Throughput";
@@ -222,7 +295,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		llamaProvider.onDidUpdateContextUsage((usage: LlamaChatContextUsageMetrics) => {
 			sessionQuality.recordContext(usage);
 			lastContextUsage = formatContextUsage(usage);
-			contextUsageStatusBar.text = lastContextUsage.statusBarText;
+			const source = runtimeSourceForModel(usage.modelId);
+			const sourceLabel = source === "deepseek" ? "DeepSeek" : "Local";
+			runtimeMetrics.set(source, {
+				...runtimeMetrics.get(source),
+				modelId: usage.modelId,
+				contextUsedTokens: usage.estimatedUsedTokens,
+				contextWindowTokens: usage.contextLength,
+				contextUsagePercent: usage.estimatedUsagePercent,
+				contextDetail: lastContextUsage.breakdown,
+				updatedAt: Date.now(),
+			});
+			contextUsageStatusBar.text = `$(pie-chart) ${sourceLabel} ctx ${Math.round(usage.estimatedUsagePercent)}%`;
 			contextUsageStatusBar.tooltip = lastContextUsage.tooltip;
 			quickActionsProvider.refresh();
 		})
@@ -253,7 +337,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 			lastThroughput = tpsText;
 			lastPromptCache = cacheText;
-			performanceStatusBar.text = `$(dashboard) local LLM ${tpsText}`;
+			const source = runtimeSourceForModel(metrics.modelId);
+			const sourceLabel = source === "deepseek" ? "DeepSeek" : "Local";
+			recordUsage({
+				provider: source,
+				inputTokens: metrics.promptTokens,
+				outputTokens: metrics.outputTokens ?? metrics.estimatedOutputTokens,
+				cachedInputTokens: metrics.cachedPromptTokens,
+				modelTurns: metrics.modelTurns,
+				durationMs: metrics.durationMs,
+				estimated: metrics.usageEstimated,
+			}, metrics.modelId);
+			runtimeMetrics.set(source, {
+				...runtimeMetrics.get(source),
+				modelId: metrics.modelId,
+				inputTokens: metrics.promptTokens,
+				outputTokens: metrics.outputTokens ?? metrics.estimatedOutputTokens,
+				cachedInputTokens: metrics.cachedPromptTokens,
+				throughputTokensPerSecond: metrics.tokensPerSecond,
+				updatedAt: Date.now(),
+			});
+			performanceStatusBar.text = `$(dashboard) ${sourceLabel} ${tpsText}`;
 			performanceStatusBar.tooltip = performanceTooltipLines.join("\n");
 			quickActionsProvider.refresh();
 		})
@@ -272,6 +376,43 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		const document = await vscode.workspace.openTextDocument(vscode.Uri.file(markdownPath));
 		await vscode.window.showTextDocument(document, { preview: false });
 		return markdownPath;
+	};
+
+	const startUsageExperiment = async (variant: ExperimentVariant): Promise<void> => {
+		const summary = usageExperiments.summary;
+		if (summary.active) {
+			vscode.window.showWarningMessage(`Usage experiment "${summary.active.label}" is already active.`);
+			return;
+		}
+		const matchingLabel = variant === "baseline"
+			? summary.latestDelegated?.label
+			: summary.latestBaseline?.label;
+		const label = await vscode.window.showInputBox({
+			title: variant === "baseline" ? "Start Baseline Usage Experiment" : "Start Delegated Usage Experiment",
+			prompt: "Use the exact same task label for both variants",
+			placeHolder: "e.g. bundle-vsix",
+			value: matchingLabel ?? "",
+			validateInput: value => value.trim().length === 0 ? "Task label is required." : undefined,
+		});
+		if (label === undefined) {
+			return;
+		}
+		const run = usageExperiments.start(label, variant);
+		await usageExperiments.flush();
+		vscode.window.showInformationMessage(`Started ${variant} usage experiment: ${run.label}`);
+	};
+
+	const exportUsageExperiment = async (): Promise<void> => {
+		const summary = usageExperiments.summary;
+		if (!summary.latestBaseline && !summary.latestDelegated) {
+			vscode.window.showWarningMessage("No completed usage experiment to export.");
+			return;
+		}
+		await writeReport(
+			"usage-experiment",
+			renderUsageExperimentMarkdown(summary),
+			summary
+		);
 	};
 
 	context.subscriptions.push(
@@ -306,6 +447,49 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			sessionQuality.clear();
 			quickActionsProvider.refresh();
 			vscode.window.showInformationMessage("Local LLM session metrics reset.");
+		}),
+		vscode.commands.registerCommand("llamacpp.startBaselineUsageExperiment", () =>
+			startUsageExperiment("baseline")
+		),
+		vscode.commands.registerCommand("llamacpp.startDelegatedUsageExperiment", () =>
+			startUsageExperiment("delegated")
+		),
+		vscode.commands.registerCommand("llamacpp.stopUsageExperiment", async () => {
+			const stopped = usageExperiments.stop();
+			if (!stopped) {
+				vscode.window.showWarningMessage("No active usage experiment to stop.");
+				return;
+			}
+			await usageExperiments.flush();
+			await exportUsageExperiment();
+			vscode.window.showInformationMessage(`Stopped ${stopped.variant} usage experiment: ${stopped.label}`);
+		}),
+		vscode.commands.registerCommand("llamacpp.exportUsageExperiment", exportUsageExperiment),
+		vscode.commands.registerCommand("llamacpp.clearUsageExperiments", async () => {
+			const choice = await vscode.window.showWarningMessage(
+				"Delete the active run and all completed usage experiments?",
+				{ modal: true },
+				"Clear"
+			);
+			if (choice !== "Clear") {
+				return;
+			}
+			usageExperiments.clear();
+			await usageExperiments.flush();
+			vscode.window.showInformationMessage("Usage experiments cleared.");
+		}),
+		vscode.commands.registerCommand("llamacpp.clearTokenUsageHistory", async () => {
+			const choice = await vscode.window.showWarningMessage(
+				"Delete all locally recorded token usage history?",
+				{ modal: true },
+				"Clear"
+			);
+			if (choice !== "Clear") {
+				return;
+			}
+			tokenUsageHistory.clear();
+			await tokenUsageHistory.flush();
+			vscode.window.showInformationMessage("Token usage history cleared.");
 		})
 	);
 
@@ -410,16 +594,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand("llamacpp.toggleCodexVsCodeTools", async () => {
-			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
-			const next = config.get<boolean>("codexUseVsCodeTools", true) === false;
-			await config.update("codexUseVsCodeTools", next, vscode.ConfigurationTarget.Global);
-			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage(`Codex VS Code tools ${next ? "enabled" : "disabled"}.`);
-		})
-	);
-
-	context.subscriptions.push(
 		vscode.commands.registerCommand("llamacpp.toggleCodexDeferredTools", async () => {
 			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
 			const next = config.get<boolean>("codexDeferNonCoreTools", true) === false;
@@ -470,6 +644,63 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				vscode.window.showErrorMessage(`Unable to read Codex status: ${message}`);
+			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.toggleClaudeSubscription", async () => {
+			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+			const next = config.get<boolean>("enableClaudeSubscription", true) === false;
+			await config.update("enableClaudeSubscription", next, vscode.ConfigurationTarget.Global);
+			claudeProvider.refreshLanguageModelChatInformation();
+			await claudeProvider.refreshStatus();
+			quickActionsProvider.refresh();
+			vscode.window.showInformationMessage(`Claude subscription source ${next ? "enabled" : "disabled"}.`);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.claudeSignIn", async () => {
+			try {
+				await claudeProvider.signIn();
+				quickActionsProvider.refresh();
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				vscode.window.showErrorMessage(`Unable to sign in to Claude: ${message}`);
+			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.claudeSignOut", async () => {
+			const confirmed = await vscode.window.showWarningMessage(
+				"Sign out of Claude? This clears the cached OAuth token.",
+				{ modal: true },
+				"Sign Out"
+			);
+			if (confirmed !== "Sign Out") {
+				return;
+			}
+			try {
+				await claudeProvider.signOut();
+				quickActionsProvider.refresh();
+				vscode.window.showInformationMessage("Claude signed out.");
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				vscode.window.showErrorMessage(`Unable to sign out of Claude: ${message}`);
+			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("llamacpp.claudeShowStatus", async () => {
+			try {
+				await claudeProvider.showStatus();
+				quickActionsProvider.refresh();
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				vscode.window.showErrorMessage(`Unable to read Claude status: ${message}`);
 			}
 		})
 	);
@@ -623,9 +854,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		vscode.commands.registerCommand("llamacpp.refreshModels", async () => {
 			llamaProvider.refreshLanguageModelChatInformation();
 			codexProvider.refreshLanguageModelChatInformation();
+			claudeProvider.refreshLanguageModelChatInformation();
 			void codexProvider.refreshStatus();
+			void claudeProvider.refreshStatus();
 			quickActionsProvider.refresh();
-			vscode.window.showInformationMessage("Local, DeepSeek, and Codex models refreshed.");
+			vscode.window.showInformationMessage("Local, DeepSeek, Codex, and Claude models refreshed.");
 		})
 	);
 
@@ -741,6 +974,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					event.affectsConfiguration("llamacpp.localServerUrl") ||
 					event.affectsConfiguration("llamacpp.localContextLength") ||
 					event.affectsConfiguration("llamacpp.enableDeepSeek") ||
+					event.affectsConfiguration("llamacpp.deepSeekContextLength") ||
 					event.affectsConfiguration("llamacpp.contextLength") ||
 					event.affectsConfiguration("llamacpp.maxOutputTokensCap") ||
 					event.affectsConfiguration("llamacpp.maxToolsPerRequest") ||
@@ -757,6 +991,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				) {
 					codexProvider.refreshLanguageModelChatInformation();
 					void codexProvider.refreshStatus();
+				}
+				if (
+					event.affectsConfiguration("llamacpp.enableClaudeSubscription") ||
+					event.affectsConfiguration("llamacpp.claudeContextLength") ||
+					event.affectsConfiguration("llamacpp.claudeMaxOutputTokens") ||
+					event.affectsConfiguration("llamacpp.claudeReasoningEffort")
+				) {
+					claudeProvider.refreshLanguageModelChatInformation();
+					void claudeProvider.refreshStatus();
 				}
 				quickActionsProvider.refresh();
 			}

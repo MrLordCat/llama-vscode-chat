@@ -1,6 +1,7 @@
 import type * as vscode from "vscode";
+import { enhanceSubagentToolDescription } from "../subagent-guidance";
 
-const MAX_TOOL_DESCRIPTION_CHARS = 1_024;
+const MAX_TOOL_DESCRIPTION_CHARS = 4_096;
 export const CODEX_DEFERRED_TOOL_NAMESPACE = "vscode_deferred";
 export const CODEX_NATIVE_TOOL_NAMESPACE = "vscode_native";
 const EAGER_TOOL_SUFFIXES = [
@@ -123,7 +124,10 @@ export function buildCodexDynamicTools(
 		const spec: CodexDynamicFunctionToolSpec = {
 			type: "function",
 			name: tool.name,
-			description: (tool.description || `Invoke the VS Code tool ${tool.name}.`).slice(0, MAX_TOOL_DESCRIPTION_CHARS),
+			description: enhanceSubagentToolDescription(
+				tool.name,
+				tool.description || `Invoke the VS Code tool ${tool.name}.`
+			).slice(0, MAX_TOOL_DESCRIPTION_CHARS),
 			inputSchema: normalizeJsonSchema(tool.inputSchema),
 			...(deferLoading ? { deferLoading: true } : {}),
 		};

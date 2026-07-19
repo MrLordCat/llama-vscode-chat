@@ -1,4 +1,6 @@
 import * as vscode from "vscode";
+import { createHash } from "node:crypto";
+import { enhanceSubagentToolDescription } from "./subagent-guidance";
 import type { OpenAIChatMessage, OpenAIContentPart, OpenAIChatRole, OpenAIFunctionToolDef, OpenAIToolCall } from "./types";
 
 // Tool calling sanitization helpers
@@ -174,6 +176,39 @@ function appendToolDescription(base: string, extra: string | undefined): string 
 	return `${base}\n\n${extra}`;
 }
 
+/**
+ * Produces stable JSON for semantically identical tool arguments and schemas.
+ * Object key order is not meaningful in JSON, but it is part of llama.cpp's
+ * exact prompt prefix and therefore affects prompt-cache reuse.
+ */
+export function stableJsonStringify(value: unknown): string {
+	const seen = new WeakSet<object>();
+	const normalize = (candidate: unknown): unknown => {
+		if (Array.isArray(candidate)) {
+			return candidate.map(normalize);
+		}
+		if (!candidate || typeof candidate !== "object") {
+			return candidate;
+		}
+		if (seen.has(candidate)) {
+			throw new TypeError("Cannot stringify a circular JSON value");
+		}
+		seen.add(candidate);
+		const source = candidate as Record<string, unknown>;
+		const result: Record<string, unknown> = {};
+		for (const key of Object.keys(source).sort((left, right) => left.localeCompare(right))) {
+			const item = source[key];
+			if (item !== undefined && typeof item !== "function" && typeof item !== "symbol") {
+				result[key] = normalize(item);
+			}
+		}
+		seen.delete(candidate);
+		return result;
+	};
+
+	return JSON.stringify(normalize(value));
+}
+
 function getToolExecutionHint(name: string, hasRunInTerminal: boolean): string | undefined {
 	switch (name) {
 		case "run_in_terminal":
@@ -280,7 +315,7 @@ export function convertMessages(
 	const toolResultMode: ToolResultMode = options?.toolResultMode === "tool" ? "tool" : "user";
 	const knownToolNames = new Map<string, string>();
 	const raw: OpenAIChatMessage[] = [];
-	for (const m of messages) {
+	for (const [messageIndex, m] of messages.entries()) {
 		const role = mapRole(m);
 		const textParts: string[] = [];
 		const reasoningParts: string[] = [];
@@ -288,18 +323,23 @@ export function convertMessages(
 		const toolResults: { callId: string; content: string; name?: string }[] = [];
 		const dataParts: vscode.LanguageModelDataPart[] = [];
 
-		for (const part of m.content ?? []) {
+		for (const [partIndex, part] of (m.content ?? []).entries()) {
 			if (part instanceof vscode.LanguageModelTextPart) {
 				textParts.push(part.value);
 			} else if (part instanceof vscode.LanguageModelToolCallPart) {
-				const id = part.callId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-				knownToolNames.set(id, part.name);
 				let args = "{}";
 				try {
-					args = JSON.stringify(part.input ?? {});
+					args = stableJsonStringify(part.input ?? {});
 				} catch {
 					args = "{}";
 				}
+				const fallbackId = createHash("sha256")
+					.update(`${messageIndex}:${partIndex}:${part.name}:`)
+					.update(args)
+					.digest("hex")
+					.slice(0, 24);
+				const id = part.callId || `call_${fallbackId}`;
+				knownToolNames.set(id, part.name);
 				toolCalls.push({ id, type: "function", function: { name: part.name, arguments: args } });
 			} else if (isToolResultPart(part)) {
 				const callId = (part as { callId?: string }).callId ?? "";
@@ -618,27 +658,30 @@ export function convertTools(
 		return `${shortened}.`;
 	};
 
+	const stableTools = sortToolsByPriority(effectiveTools);
 	const selectedTools = (() => {
 		if (mode !== "apiDirect" || requiredMode) {
-			return effectiveTools;
+			return stableTools;
 		}
 
 		const countLimit = apiDirectIncludeAllTools
 			? apiDirectMaxTools
 			: Math.min(apiDirectMaxTools, 48);
-		return sortToolsByPriority(effectiveTools).slice(0, countLimit);
+		return stableTools.slice(0, countLimit);
 	})();
 
 	const unbudgetedToolDefs: OpenAIFunctionToolDef[] = selectedTools.map((t) => {
 			const name = sanitizeFunctionName(t.name);
 			const descriptionBase = typeof t.description === "string" ? t.description : "";
 			const description = appendToolDescription(
-				normalizeDescriptionForMode(name, descriptionBase),
+				enhanceSubagentToolDescription(name, normalizeDescriptionForMode(name, descriptionBase)),
 				getToolExecutionHint(name, hasRunInTerminal)
 			);
-			const params = sanitizeSchema(t.inputSchema ?? { type: "object", properties: {} });
+			const params = JSON.parse(stableJsonStringify(
+				sanitizeSchema(t.inputSchema ?? { type: "object", properties: {} })
+			)) as Record<string, unknown>;
 			const normalizedParams = mode === "apiDirect"
-				? (compactApiDirectSchema(params) as Record<string, unknown>)
+				? (JSON.parse(stableJsonStringify(compactApiDirectSchema(params))) as Record<string, unknown>)
 				: params;
 			return {
 				type: "function" as const,

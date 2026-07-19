@@ -72,6 +72,19 @@ export function calculatePromptCacheUsage(usage: ChatTokenUsage): PromptCacheUsa
 	};
 }
 
+export function mergeChatTokenUsage(left: ChatTokenUsage, right: ChatTokenUsage): ChatTokenUsage {
+	const leftCached = left.prompt_tokens_details?.cached_tokens;
+	const rightCached = right.prompt_tokens_details?.cached_tokens;
+	return {
+		prompt_tokens: left.prompt_tokens + right.prompt_tokens,
+		completion_tokens: left.completion_tokens + right.completion_tokens,
+		total_tokens: left.total_tokens + right.total_tokens,
+		...(leftCached !== undefined && rightCached !== undefined
+			? { prompt_tokens_details: { cached_tokens: leftCached + rightCached } }
+			: {}),
+	};
+}
+
 export function estimateChatTokenUsage(promptTokens: number, completionCharacters: number): ChatTokenUsage {
 	const normalizedPromptTokens = Math.max(0, Math.floor(promptTokens));
 	const completionTokens = Math.ceil(Math.max(0, completionCharacters) / 4);

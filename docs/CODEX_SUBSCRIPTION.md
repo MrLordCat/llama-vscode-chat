@@ -125,14 +125,11 @@ shown or written to extension logs.
 | `llamacpp.codexCliPath` | empty | Optional explicit Codex executable. |
 | `llamacpp.codexReasoningEffort` | `auto` | Use model default or a supported effort. |
 | `llamacpp.codexReasoningSummary` | `auto` | Thinking summary detail. |
-| `llamacpp.codexSandboxMode` | `workspace-write` | Runtime filesystem sandbox. |
-| `llamacpp.codexApprovalPolicy` | `on-request` | Runtime approval behavior. |
 | `llamacpp.codexFastServiceTier` | `false` | Request priority service when offered; uses quota faster. |
 | `llamacpp.codexEphemeralThreads` | `true` | Avoid duplicating Copilot-owned histories. |
 | `llamacpp.codexContextLength` | `258400` | Context advertised to VS Code. |
 | `llamacpp.codexMaxInputChars` | `600000` | Serialized conversation limit below the app-server hard request limit. |
 | `llamacpp.codexMaxToolResultChars` | `12000` | Per-result history cap that preserves more conversational turns. |
-| `llamacpp.codexUseVsCodeTools` | `true` | Delegate Codex-selected tools to Copilot's native tool loop and approvals. |
 | `llamacpp.codexDeferNonCoreTools` | `true` | Keep core coding tools eager and load uncommon schemas through Codex tool search. |
 | `llamacpp.codexMaxOutputTokens` | `32768` | Reply reserve advertised to VS Code. |
 
@@ -141,9 +138,10 @@ The native per-chat selector takes precedence over the global default. If an
 effort is unavailable for a selected model, the provider falls back to that
 model's catalog default.
 
-`danger-full-access` and `never` approvals are available for advanced local
-workflows but are not recommended defaults. `workspace-write` with `on-request`
-keeps normal project edits ergonomic while requiring approval for escalation.
+Codex actions always use Copilot's native VS Code tool loop. The provider
+forces the internal runtime to `read-only` plus `on-request`, disables built-in
+action capabilities, declines internal permission requests, and interrupts a
+turn if an internal action still appears. There is intentionally no opt-out.
 
 ## Troubleshooting
 
@@ -164,11 +162,21 @@ refresh models.
 
 ### Commands or searches remain inside the thinking block
 
-Confirm that `llamacpp.codexUseVsCodeTools` is enabled. A command routed through
-the native bridge produces `codex.chat.tool_delegated` and a normal Copilot tool
-card. Copilot then executes it using the current session approval mode. An
-`codex.internal_tool.declined` event means Codex first selected an internal tool;
-the provider rejected it so the model can retry with the matching outer tool.
+A command routed through the native bridge produces `codex.chat.tool_delegated`
+and a normal Copilot tool card. Copilot then executes it using the current
+session approval mode. `codex.internal_tool.declined` or
+`codex.internal_tool.blocked` means the runtime attempted a forbidden internal
+path; the provider denied or interrupted it instead of executing invisibly.
+
+### Native VS Code tool delegation is unavailable
+
+Version 1.5.28 fixes a hand-off race where a second dynamic tool call could
+arrive after the first native card detached but before its result resumed the
+turn. Such calls are now logged as `codex.chat.tool_delegation_queued` and
+shown in the next native tool segment. A remaining
+`codex.chat.tool_delegation_unavailable` event includes an explicit reason;
+`detached-without-pending-turn` indicates an unrelated call with no valid
+Copilot result round to resume and is intentionally rejected.
 
 ### Context display differs from the runtime
 

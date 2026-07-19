@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.5.28 - 2026-07-19
+
+- Fixed the `Native VS Code tool delegation is unavailable` race by queuing
+  Codex tool calls that arrive between a delegated boundary and the next
+  tool-result resume, then exposing them in a fresh native VS Code tool card.
+- Added explicit queued/unavailable bridge diagnostics and regression coverage
+  for late sequential tool calls without weakening the VS Code-only boundary.
+- Moved Claude availability refreshes off the critical path for Local, Qwen,
+  DeepSeek, and Codex requests while preserving Claude's own live preflight.
+- Removed confirmed dead fields, exports, redundant routing checks, and a stale
+  lock-file backup; the strict unused-symbol audit now passes cleanly.
+- Updated the public documentation for Claude support, native-only actions,
+  warm session reuse, and the distinction between current-prompt cache coverage
+  and previous-prefix retention.
+
+## 1.5.27 - 2026-07-19
+
+- Made native VS Code tool delegation mandatory for Codex, matching the
+  existing Claude SDK boundary; legacy Codex sandbox, approval, and tool
+  opt-out settings no longer expose an alternate execution path.
+- Disabled Codex built-in shell, web, MCP, browser, computer-use, image,
+  plugin, hook, and subagent capabilities at thread startup while forcing a
+  read-only sandbox and declining every internal permission request.
+- Added a fail-closed turn guard that interrupts and rejects any unexpected
+  internal Codex action before it can be presented as normal model progress.
+
+## 1.5.26 - 2026-07-19
+
+- Stabilized local and DeepSeek prompt prefixes by canonicalizing tool order,
+  JSON schemas, tool arguments, and fallback tool-call identifiers.
+- Removed volatile subscription availability and reset details from the
+  model-visible `runSubagent` tool description while retaining routing policy.
+- Added privacy-preserving cache-prefix fingerprints and prefix-continuity
+  diagnostics to request logs without recording prompt contents.
+- Added uncached-input totals and zero-cache-read counts to persistent Token
+  Usage and Usage Experiment summaries.
+
+## 1.5.25 - 2026-07-19
+
+- Added persistent baseline/delegated usage experiments with Codex-only savings,
+  separate child-provider and per-model totals, matched task labels, and
+  Markdown/JSON report export from Quick Access.
+- Recorded experiment samples from the existing completed-usage events for
+  Local/Qwen, DeepSeek, Codex, and Claude without adding a second completion
+  path or counting live snapshots.
+- Corrected subagent routing guidance: `agentName` selects behavior while the
+  optional exact `runSubagent.model` picker label switches model/provider.
+- Raised Codex post-tool reconciliation idle tolerance from 30 seconds to
+  three minutes so high-effort reasoning is not mistaken for a stalled turn.
+- Added one bounded same-thread recovery for genuinely stale tool turns,
+  preserving the Codex thread and prompt cache instead of triggering
+  Copilot's full-history retry.
+- Added terminal and reconciliation diagnostics with the last observed thread
+  status, while keeping permanent input, authorization, and rate-limit errors
+  non-retryable.
+
 ## 1.4.12 - 2026-07-18
 
 - Added an explicit cross-extension conversation contract: Copilot patch v7

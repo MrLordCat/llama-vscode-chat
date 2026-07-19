@@ -1,11 +1,78 @@
 import * as vscode from "vscode";
 
 import { CONFIG_SECTION, DEFAULT_LOCAL_REASONING_BUDGET } from "../constants";
+import { formatCompactTokenCount } from "../provider-metrics";
 import type { ThinkingMode } from "../reasoning";
 
 type ToolResultMode = "auto" | "tool" | "user";
 type ToolCallingMode = "classic" | "apiDirect";
 type KnowledgeMode = "off" | "adaptive" | "strict";
+
+const CONTEXT_LIMIT_PRESETS = [65_536, 131_072, 258_400, 524_288, 1_048_576];
+
+async function pickContextLimit(title: string, current: number, maximum: number): Promise<number | undefined> {
+	const presetValues = CONTEXT_LIMIT_PRESETS.filter(value => value <= maximum);
+	if (!presetValues.includes(current)) {
+		presetValues.push(current);
+		presetValues.sort((left, right) => left - right);
+	}
+	const picked = await vscode.window.showQuickPick(
+		[
+			...presetValues.map(value => ({
+				label: formatCompactTokenCount(value),
+				description: value === 258_400 ? "Matches the current Codex context window" : undefined,
+				detail: value === current ? "Current" : undefined,
+				value,
+			})),
+			{ label: "Custom...", description: "Enter an exact token limit", custom: true as const },
+		],
+		{ title, placeHolder: "Select the maximum advertised context", ignoreFocusOut: true }
+	);
+	if (!picked) {
+		return undefined;
+	}
+	if ("value" in picked && typeof picked.value === "number") {
+		return picked.value;
+	}
+	const entered = await vscode.window.showInputBox({
+		title: `${title}: Custom Limit`,
+		prompt: `Enter a whole number from 32768 to ${maximum}`,
+		value: String(current),
+		ignoreFocusOut: true,
+		validateInput: input => {
+			if (!/^\d+$/.test(input.trim())) {
+				return "Enter a whole number";
+			}
+			const parsed = Number(input);
+			return parsed < 32_768 || parsed > maximum
+				? `Value must be between 32768 and ${maximum}`
+				: undefined;
+		},
+	});
+	return entered === undefined ? undefined : Math.floor(Number(entered));
+}
+
+function contextLimitCommand(
+	commandId: string,
+	setting: string,
+	title: string,
+	fallback: number,
+	maximum: number,
+	refresh: () => void
+): vscode.Disposable {
+	return vscode.commands.registerCommand(commandId, async () => {
+		const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
+		const configured = Number(config.get(setting, fallback));
+		const current = Number.isFinite(configured) ? configured : fallback;
+		const next = await pickContextLimit(title, current, maximum);
+		if (next === undefined) {
+			return;
+		}
+		await config.update(setting, next, vscode.ConfigurationTarget.Global);
+		refresh();
+		vscode.window.showInformationMessage(`${title}: ${formatCompactTokenCount(next)} tokens`);
+	});
+}
 
 async function pickThinkingMode(current: ThinkingMode): Promise<ThinkingMode | undefined> {
 	const options: Array<{ label: string; description: string; value: ThinkingMode }> = [
@@ -65,6 +132,22 @@ async function pickKnowledgeMode(current: KnowledgeMode): Promise<KnowledgeMode 
 
 export function registerModelBehaviorCommands(refresh: () => void): vscode.Disposable[] {
 	return [
+		contextLimitCommand(
+			"llamacpp.setDeepSeekContextLength",
+			"deepSeekContextLength",
+			"DeepSeek Maximum Context",
+			258_400,
+			1_048_576,
+			refresh
+		),
+		contextLimitCommand(
+			"llamacpp.setClaudeContextLength",
+			"claudeContextLength",
+			"Claude Maximum Context",
+			258_400,
+			1_048_576,
+			refresh
+		),
 		vscode.commands.registerCommand("llamacpp.setThinkingMode", async () => {
 			const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
 			const current = String(config.get("thinkingMode", "auto")) as ThinkingMode;

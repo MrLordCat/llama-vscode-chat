@@ -15,6 +15,8 @@ function turn(overrides: Partial<LlamaChatTurnMetrics> = {}): LlamaChatTurnMetri
 		outputChars: 400,
 		thinkingChars: 100,
 		estimatedOutputTokens: 100,
+		modelTurns: 1,
+		usageEstimated: false,
 		tokensPerSecond: 20,
 		promptTokens: 1000,
 		cachedPromptTokens: 750,

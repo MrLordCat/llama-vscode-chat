@@ -79,7 +79,7 @@ export interface CodexRateLimitsResponse {
 }
 
 export interface CodexThreadStartResponse {
-	thread: { id: string };
+	thread: { id: string; ephemeral?: boolean };
 	model: string;
 	modelProvider: string;
 }
@@ -102,6 +102,22 @@ export interface CodexTurnCompletedParams {
 		id: string;
 		status: "completed" | "interrupted" | "failed";
 		error: { message?: string } | null;
+	};
+}
+
+export interface CodexThreadTurnSnapshot {
+	id: string;
+	status: "completed" | "interrupted" | "failed" | "inProgress";
+	error: { message?: string } | null;
+	items: Array<Record<string, unknown>>;
+}
+
+export interface CodexThreadReadResponse {
+	thread: {
+		id: string;
+		ephemeral?: boolean;
+		status?: { type?: string };
+		turns?: CodexThreadTurnSnapshot[];
 	};
 }
 
