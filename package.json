@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/MrLordCat/llama-vscode-chat.git"
 	},
-	"version": "1.5.28",
+	"version": "1.5.31",
 	"engines": {
 		"vscode": "^1.104.0"
 	},

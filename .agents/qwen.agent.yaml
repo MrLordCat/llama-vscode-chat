@@ -1,0 +1,18 @@
+name: qwen
+displayName: Qwen Local Agent
+description: >
+  Local Qwen model for all read-only and visual inspection tasks.
+  Has access to workspace tools (grep, glob, view, bash, lsp).
+  Use for: visual inspection of screenshots and images (view_image),
+  UI layout analysis, screen capture review, terminal output analysis,
+  narrow mechanical subtasks, single-file reads, grep triage.
+  Report observations concisely back to the calling model.
+model: qwen3-coder
+tools:
+  - grep
+  - glob
+  - view
+  - bash
+  - read_bash
+  - stop_bash
+  - lsp

@@ -39,6 +39,28 @@ All enabled sources appear together in the native model picker with labels such
 as `(Local)`, `(DeepSeek)`, `(Codex)`, and `(Claude)`. Internal source prefixes route each
 request to the correct transport and are never sent to the upstream model.
 
+### Available Model Tiers
+
+| Model | Source | Tier | Tokens | Best For |
+| --- | --- | --- | --- | --- |
+| **Qwen 3.6 27B** | Local | Free | Unlimited | Narrow verifiable tasks, visual inspection, grep/file reads, terminal output. Always available, no rate limits. |
+| **DeepSeek V4 Pro** | DeepSeek API | Budget | API limits | Focused multi-step reasoning, cross-file analysis, architecture review. |
+| **GPT-5.6 Luna** | Codex (ChatGPT) | Premium | Subscription | General coding, single-file edits, code review, subagent tasks. Lower token cost than Sol. |
+| **GPT-5.6 Terra** | Codex (ChatGPT) | Premium | Subscription | General coding, code generation, refactoring. |
+| **GPT-5.6 Sol** | Codex (ChatGPT) | Premium | Subscription | Most powerful Codex model. Repository-wide refactoring, complex implementations. Excluded from subagent use to conserve quota. |
+| **Claude Haiku 4.5** | Claude | Premium | Subscription | Fastest Claude model, quick simple tasks. |
+| **Claude Sonnet 4.5** | Claude | Premium | Subscription | Best balance of speed and capability. |
+| **Claude Opus 4.8** | Claude | Premium | Subscription | Most capable model for complex analysis, security audits, architecture design. |
+| **Claude Fable 5** | Claude | Premium | Subscription | Vision-capable coding model. |
+
+**Cost-tier routing for subagents:** prefer Qwen (free/unlimited) for any task it
+can handle → DeepSeek for focused reasoning → Codex/Claude subscription models
+only for work the cheaper tiers cannot do. Premium models consume limited
+subscription budget — escalate only when genuinely necessary.
+
+Custom global agents for each model are available in `~/.copilot/agents/`,
+providing tailored instructions and tool configurations per model.
+
 ## Key Features
 
 ### Unified Copilot Chat Flow

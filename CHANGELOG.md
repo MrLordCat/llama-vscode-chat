@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.5.31 - 2026-07-24
+
+- Added global custom agents for all available model tiers: Qwen 3.6 27B
+  (local, unlimited tokens), DeepSeek V4 Pro (API), GPT-5.6 Sol/Luna/Terra
+  (Codex subscription), and Claude Opus 4.8 (Claude subscription). Each agent
+  describes its strengths, limitations, and best-use scenarios.
+- Enhanced subagent budget routing policy with explicit model names and
+  Qwen's unlimited-token advantage for large-output operations.
+- Updated project README with model comparison table, cloud subscription
+  availability notes, and current model tier descriptions.
+
+## 1.5.30 - 2026-07-20
+
+- Prevented DeepSeek and local models from accidentally multiplying terminal
+  tabs when they pass small sync `run_in_terminal.timeout` values as seconds:
+  suspicious values from 1 through 999 are now repaired to milliseconds before native
+  VS Code tool execution.
+- Strengthened terminal tool guidance to reuse the persistent sync shell, keep
+  at most one background terminal, reserve async mode for indefinite services,
+  and continue an existing background job by terminal id.
+- Added regression coverage for timeout repair, intentional millisecond/zero/
+  async timeouts, and the model-visible terminal reuse contract.
+
+## 1.5.29 - 2026-07-19
+
+- Added a cost-tiered subagent budget routing policy to the model-visible
+  `runSubagent` guidance: prefer the cheapest capable tier (local for
+  narrow/verifiable subtasks, DeepSeek for focused reasoning) and escalate to
+  Codex/Claude subscription models only for work the cheaper tiers cannot do.
+- Disabled implicit subagent model inheritance: `runSubagent.model` is now
+  mandatory and must be one of the catalog models, preventing Copilot
+  built-in or free-tier models from being selected for subagents.
+- Added regression coverage for tier ordering, single-tier omission, and the
+  mandatory-selection policy across the subagent and Codex guidance tests.
+
 ## 1.5.28 - 2026-07-19
 
 - Fixed the `Native VS Code tool delegation is unavailable` race by queuing
