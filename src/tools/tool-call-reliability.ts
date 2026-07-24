@@ -329,6 +329,22 @@ export function validateToolArguments(argumentsValue: Record<string, unknown>, s
 	return issues.slice(0, 8);
 }
 
+function repairTerminalTimeout(
+	name: string,
+	argumentsValue: Record<string, unknown>,
+	repairEnabled: boolean
+): boolean {
+	if (!repairEnabled || name !== "run_in_terminal" || argumentsValue.mode !== "sync") {
+		return false;
+	}
+	const timeout = argumentsValue.timeout;
+	if (typeof timeout !== "number" || !Number.isInteger(timeout) || timeout < 1 || timeout > 999) {
+		return false;
+	}
+	argumentsValue.timeout = timeout * 1_000;
+	return true;
+}
+
 export class ToolCallReliabilityGuard {
 	private definitions = new Map<string, OpenAIFunctionToolDef>();
 	private namesByLowerCase = new Map<string, string>();
@@ -374,6 +390,9 @@ export class ToolCallReliabilityGuard {
 				this.metrics.unknownTool += 1;
 				return { ok: false, pending: false, kind: "unknown_tool", reason: `unknown tool: ${rawName || "<missing>"}` };
 			}
+		}
+		if (repairTerminalTimeout(name, parsed.value, this.options.repairEnabled)) {
+			repaired = true;
 		}
 
 		const definition = this.definitions.get(name);

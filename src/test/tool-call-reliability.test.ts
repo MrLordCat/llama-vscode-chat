@@ -22,6 +22,23 @@ const tool: OpenAIFunctionToolDef = {
 	},
 };
 
+const terminalTool: OpenAIFunctionToolDef = {
+	type: "function",
+	function: {
+		name: "run_in_terminal",
+		parameters: {
+			type: "object",
+			properties: {
+				command: { type: "string" },
+				mode: { enum: ["sync", "async"] },
+				timeout: { type: "number", minimum: 0 },
+			},
+			required: ["command", "mode"],
+			additionalProperties: false,
+		},
+	},
+};
+
 suite("tool call reliability", () => {
 	test("repairs fenced objects and trailing commas conservatively", () => {
 		const parsed = parseToolArguments("```json\n{\"path\":\"README.md\",}\n```", true);
@@ -81,6 +98,33 @@ suite("tool call reliability", () => {
 			schemaRejected: 0,
 			loopDetected: false,
 		});
+	});
+
+	test("repairs second-like sync terminal timeouts before schema validation", () => {
+		const guard = new ToolCallReliabilityGuard();
+		guard.configure([terminalTool], { repairEnabled: true, validateSchema: true });
+		const result = guard.evaluate("run_in_terminal", '{"command":"npm test","mode":"sync","timeout":300}', true);
+		assert.ok(result.ok);
+		assert.deepStrictEqual(result.ok && result.arguments, {
+			command: "npm test",
+			mode: "sync",
+			timeout: 300_000,
+		});
+		assert.strictEqual(result.ok && result.repaired, true);
+		assert.strictEqual(guard.consumeMetrics().repaired, 1);
+	});
+
+	test("leaves millisecond, zero, and async terminal timeouts unchanged", () => {
+		const guard = new ToolCallReliabilityGuard();
+		guard.configure([terminalTool], { repairEnabled: true, validateSchema: true });
+		const millisecond = guard.evaluate("run_in_terminal", '{"command":"npm test","mode":"sync","timeout":300000}', true);
+		const shortMillisecond = guard.evaluate("run_in_terminal", '{"command":"quick probe","mode":"sync","timeout":3600}', true);
+		const noLimit = guard.evaluate("run_in_terminal", '{"command":"npm test","mode":"sync","timeout":0}', true);
+		const async = guard.evaluate("run_in_terminal", '{"command":"npm run dev","mode":"async","timeout":300}', true);
+		assert.ok(millisecond.ok && millisecond.arguments.timeout === 300_000 && !millisecond.repaired);
+		assert.ok(shortMillisecond.ok && shortMillisecond.arguments.timeout === 3_600 && !shortMillisecond.repaired);
+		assert.ok(noLimit.ok && noLimit.arguments.timeout === 0 && !noLimit.repaired);
+		assert.ok(async.ok && async.arguments.timeout === 300 && !async.repaired);
 	});
 
 	test("rejects unknown tools and invalid schemas", () => {

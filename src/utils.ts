@@ -212,7 +212,7 @@ export function stableJsonStringify(value: unknown): string {
 function getToolExecutionHint(name: string, hasRunInTerminal: boolean): string | undefined {
 	switch (name) {
 		case "run_in_terminal":
-				return "Primary shell execution tool. Use this for running scripts and one-off terminal commands. For large JSON/JSONL files, keep output bounded with head/tail/rg instead of printing entire files.";
+				return "Primary persistent shell tool. Batch related one-off commands in sync mode and keep at most one background terminal. Use async only for an indefinite server, watcher, or daemon. For sync commands omit timeout when possible; timeout is milliseconds (120 seconds = 120000), never 120/300/600 as seconds because expiry creates another background terminal. Reuse a returned terminal id with get_terminal_output or send_to_terminal instead of starting another background job. For large JSON/JSONL files, keep output bounded with head/tail/rg instead of printing entire files.";
 		case "run_task":
 			return "Use this for existing workspace tasks from tasks.json or detected npm tasks. After starting a task, read its output with get_task_output.";
 		case "get_task_output":

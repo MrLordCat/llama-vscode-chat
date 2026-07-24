@@ -1470,6 +1470,22 @@ suite("Llama.cpp Chat Provider Extension", () => {
             assert.ok(!names.includes("run_vscode_command"));
         });
 
+        test("convertTools tells models to reuse the persistent terminal safely", () => {
+            const out = convertTools({
+                toolMode: vscode.LanguageModelChatToolMode.Auto,
+                tools: [{
+                    name: "run_in_terminal",
+                    description: "Run a terminal command",
+                    inputSchema: { type: "object", properties: {} },
+                }],
+            } satisfies vscode.ProvideLanguageModelChatResponseOptions);
+
+            const description = out.tools?.[0]?.function.description ?? "";
+            assert.ok(description.includes("keep at most one background terminal"));
+            assert.ok(description.includes("120 seconds = 120000"));
+            assert.ok(description.includes("Reuse a returned terminal id"));
+        });
+
         test("convertTools keeps run_vscode_command in required mode", () => {
             const out = convertTools({
                 toolMode: vscode.LanguageModelChatToolMode.Required,

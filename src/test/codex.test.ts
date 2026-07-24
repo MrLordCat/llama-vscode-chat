@@ -1103,7 +1103,7 @@ suite("Codex subscription provider", () => {
 		const tool = dynamic.specs.find(spec => spec.type === "function");
 		assert.ok(tool && tool.type === "function");
 		assert.ok(tool.description.includes("Subagent model routing"));
-		assert.ok(tool.description.includes("inherits the parent model"));
+		assert.ok(tool.description.includes("Never omit runSubagent.model and never select a Copilot built-in or free-tier model"));
 	});
 
 	test("defers uncommon Codex tools while keeping the core agent loop eager", () => {
